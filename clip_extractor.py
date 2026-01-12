@@ -91,15 +91,15 @@ class ClipExtractor:
             logging.error(f"Failed to validate AWS credentials: {e}")
             return False
     
-    def _parse_chunk_end_time(self, filename: str) -> Optional[datetime.datetime]:
+    def _parse_chunk_start_time(self, filename: str) -> Optional[datetime.datetime]:
         """
-        Parse chunk end time from filename
+        Parse chunk start time from filename
         
         Args:
             filename: Chunk filename (e.g., gcam_22122025_075030.mp4)
             
         Returns:
-            Datetime object representing chunk end time, or None if parsing fails
+            Datetime object representing chunk start time, or None if parsing fails
         """
         match = self.filename_re.match(filename)
         if not match:
@@ -131,13 +131,13 @@ class ClipExtractor:
                     key = obj["Key"]
                     filename = os.path.basename(key)
                     
-                    # Parse end time from filename
-                    end_time = self._parse_chunk_end_time(filename)
-                    if not end_time:
+                    # Parse start time from filename
+                    start_time = self._parse_chunk_start_time(filename)
+                    if not start_time:
                         continue
                     
-                    # Calculate start time (chunk duration before end time)
-                    start_time = end_time - datetime.timedelta(seconds=self.chunk_duration_seconds)
+                    # Calculate end time (chunk duration after start time)
+                    end_time = start_time + datetime.timedelta(seconds=self.chunk_duration_seconds)
                     
                     chunks.append({
                         "key": key,
@@ -174,13 +174,13 @@ class ClipExtractor:
                 if not filename.endswith('.mp4'):
                     continue
                 
-                # Parse end time from filename
-                end_time = self._parse_chunk_end_time(filename)
-                if not end_time:
+                # Parse start time from filename
+                start_time = self._parse_chunk_start_time(filename)
+                if not start_time:
                     continue
                 
-                # Calculate start time (chunk duration before end time)
-                start_time = end_time - datetime.timedelta(seconds=self.chunk_duration_seconds)
+                # Calculate end time (chunk duration after start time)
+                end_time = start_time + datetime.timedelta(seconds=self.chunk_duration_seconds)
                 
                 filepath = os.path.join(self.local_source_dir, filename)
                 
