@@ -79,7 +79,7 @@ def load_config(config_file="config.conf"):
 
 def process_alert(alert: Dict, clip_extractor: ClipExtractor, 
                   s3_uploader: S3Uploader, api_client: APIClient, 
-                  max_retries: int = 3) -> Tuple[bool, Optional[str], Optional[str]]:
+                  max_retries: int = 3, retry_delay_seconds: int = 2) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Process a single alert: extract clip, upload to S3, update API
     
@@ -89,6 +89,7 @@ def process_alert(alert: Dict, clip_extractor: ClipExtractor,
         s3_uploader: S3Uploader instance
         api_client: APIClient instance
         max_retries: Maximum number of retry attempts for network failures
+        retry_delay_seconds: Initial delay between retries (doubles with each retry)
         
     Returns:
         Tuple of (success: bool, video_url: Optional[str], thumbnail_url: Optional[str])
@@ -106,7 +107,7 @@ def process_alert(alert: Dict, clip_extractor: ClipExtractor,
     # Extract clip with retry logic for network failures
     mp4_file = None
     thumbnail_file = None
-    retry_delay = 2
+    retry_delay = retry_delay_seconds
     
     for attempt in range(max_retries):
         mp4_file, thumbnail_file = clip_extractor.extract_clip(alert_date)
@@ -242,6 +243,10 @@ def main():
             local_source_dir = local_source_dir.strip()
             if not local_source_dir:  # Empty string means use S3
                 local_source_dir = None
+        
+        # Processing Configuration
+        max_retries = int(config.get("PROCESSING", "MAX_RETRIES", fallback="3").strip())
+        retry_delay_seconds = int(config.get("PROCESSING", "RETRY_DELAY_SECONDS", fallback="2").strip())
         
         # API Configuration
         api_base_url = config.get("API", "BASE_URL").strip()
@@ -381,7 +386,10 @@ def main():
     processed_alerts = []  # List of (alert, video_url, thumbnail_url) tuples for successful alerts
     
     for alert in alerts:
-        success, video_url, thumbnail_url = process_alert(alert, clip_extractor, s3_uploader, api_client)
+        success, video_url, thumbnail_url = process_alert(
+            alert, clip_extractor, s3_uploader, api_client,
+            max_retries=max_retries, retry_delay_seconds=retry_delay_seconds
+        )
         if success:
             successful += 1
             processed_alerts.append((alert, video_url, thumbnail_url))
