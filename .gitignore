@@ -16,5 +16,3 @@ build/
 *.swo
 *~
 .DS_Store
-config.conf
-
