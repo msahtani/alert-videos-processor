@@ -224,8 +224,14 @@ def main():
     
     # Initialize components
     try:
-        # AWS Configuration
-        aws_region = config.get("AWS", "REGION").strip()
+        # AWS Configuration - region from environment variable
+        import os
+        aws_region = os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION")
+        if not aws_region:
+            logging.error("AWS region not found in environment variables!")
+            logging.error("Please set AWS_DEFAULT_REGION or AWS_REGION environment variable")
+            sys.exit(1)
+        aws_region = aws_region.strip()
         s3_bucket = config.get("AWS", "S3_BUCKET").strip()
         s3_prefix = config.get("AWS", "S3_PREFIX").strip()
         s3_upload_prefix = config.get("AWS", "S3_UPLOAD_PREFIX", fallback="alerts/").strip()
