@@ -27,13 +27,13 @@ def setup_logging(verbose=False):
 
 
 def setup_aws_credentials(config):
-    """Set up AWS credentials from config file"""
+    """Set up AWS credentials from environment variables"""
     import os
     
-    # Read credentials from config
-    access_key = config.get("AWS", "ACCESS_KEY_ID", fallback=None)
-    secret_key = config.get("AWS", "SECRET_ACCESS_KEY", fallback=None)
-    region = config.get("AWS", "REGION", fallback=None)
+    # Read credentials from environment variables
+    access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    region = os.environ.get("AWS_DEFAULT_REGION")
     
     if access_key:
         access_key = access_key.strip()
@@ -42,11 +42,11 @@ def setup_aws_credentials(config):
     if region:
         region = region.strip()
     
-    # Set environment variables if credentials are in config
+    # Set environment variables if credentials are from env
     if access_key and secret_key:
         os.environ["AWS_ACCESS_KEY_ID"] = access_key
         os.environ["AWS_SECRET_ACCESS_KEY"] = secret_key
-        logging.debug("AWS credentials loaded from config file")
+        logging.debug("AWS credentials loaded from environment variables")
     
     if region:
         os.environ["AWS_DEFAULT_REGION"] = region
@@ -287,10 +287,11 @@ def main():
     email_sender = None
     if email_enabled:
         try:
-            smtp_server = config.get("EMAIL", "SMTP_SERVER").strip()
-            smtp_port = int(config.get("EMAIL", "SMTP_PORT").strip())
-            smtp_username = config.get("EMAIL", "SMTP_USERNAME").strip()
-            smtp_password = config.get("EMAIL", "SMTP_PASSWORD").strip()
+            import os
+            smtp_server = os.environ.get("SMTP_SERVER", "").strip()
+            smtp_port = int(os.environ.get("SMTP_PORT", "587").strip())
+            smtp_username = os.environ.get("SMTP_USERNAME", "").strip()
+            smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
             from_email = config.get("EMAIL", "FROM_EMAIL").strip()
             to_emails_str = config.get("EMAIL", "TO_EMAILS").strip()
             to_emails = [email.strip() for email in to_emails_str.split(',')]

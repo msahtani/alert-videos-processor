@@ -2,6 +2,7 @@
 API Client for interacting with the alerts API
 Handles fetching alerts and updating alert secondary video URLs
 """
+import os
 import requests
 import logging
 from typing import List, Dict, Optional
@@ -14,7 +15,7 @@ class APIClient:
     def __init__(self, base_url: str, alerts_endpoint: str, secondary_video_endpoint: str):
         """
         Initialize API client
-        
+
         Args:
             base_url: Base URL of the API (e.g., http://49.13.89.74:8080)
             alerts_endpoint: Endpoint for fetching alerts (e.g., /api/alerts)
@@ -30,18 +31,19 @@ class APIClient:
         
         Args:
             date: Date in ISO format (e.g., 2025-12-10T00:00:00)
-            
+        
         Returns:
             List of alert dictionaries
-            
+
         Raises:
             requests.RequestException: If the API request fails
         """
         url = f"{self.base_url}{self.alerts_endpoint}"
-        params = {"date": date}
-        
+        store_id = os.environ.get("STOREYES_STORE_ID", "")
+        params = {"date": date, "store_id": store_id, "unprocessed": "true"}
+
         logging.info(f"Fetching alerts from {url} with date={date}")
-        
+
         try:
             response = requests.get(url, params=params, timeout=30)
             response.raise_for_status()
@@ -51,7 +53,7 @@ class APIClient:
         except requests.RequestException as e:
             logging.error(f"Failed to fetch alerts: {e}")
             raise
-    
+
     def update_secondary_video(self, alert_id: int, secondary_video_url: str, image_url: str) -> bool:
         """
         Update the secondary video URL and image URL for an alert
@@ -89,4 +91,3 @@ class APIClient:
                 logging.error(f"Response status: {e.response.status_code}")
                 logging.error(f"Response body: {e.response.text}")
             raise
-
