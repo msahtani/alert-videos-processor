@@ -227,7 +227,6 @@ def main():
     # Initialize components
     try:
         # AWS Configuration - region from environment variable
-        import os
         aws_region = os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION")
         if not aws_region:
             logging.error("AWS region not found in environment variables!")
