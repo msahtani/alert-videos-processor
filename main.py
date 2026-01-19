@@ -301,7 +301,6 @@ def main():
     email_sender = None
     if email_enabled:
         try:
-            import os
             smtp_server = os.environ.get("SMTP_SERVER", "").strip()
             smtp_port = int(os.environ.get("SMTP_PORT", "587").strip())
             smtp_username = os.environ.get("SMTP_USERNAME", "").strip()
