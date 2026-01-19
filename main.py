@@ -4,6 +4,7 @@ Main orchestrator script for processing alerts and extracting video clips
 import configparser
 import argparse
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone, timedelta
@@ -215,6 +216,7 @@ def main():
     if local_source_dir:
         local_source_dir = local_source_dir.strip()
         if local_source_dir:
+            local_source_dir = os.path.expandvars(local_source_dir)
             logging.info(f"Loading source videos from local directory: {local_source_dir}")
     
     # AWS credentials are always required for uploading processed clips to S3
@@ -247,7 +249,9 @@ def main():
         local_source_dir = config.get("CLIP", "LOCAL_SOURCE_DIR", fallback=None)
         if local_source_dir:
             local_source_dir = local_source_dir.strip()
-            if not local_source_dir:  # Empty string means use S3
+            if local_source_dir:  # Only expand if not empty
+                local_source_dir = os.path.expandvars(local_source_dir)
+            else:  # Empty string means use S3
                 local_source_dir = None
         
         # Processing Configuration
