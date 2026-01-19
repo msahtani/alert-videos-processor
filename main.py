@@ -254,8 +254,13 @@ def main():
         max_retries = int(config.get("PROCESSING", "MAX_RETRIES", fallback="3").strip())
         retry_delay_seconds = int(config.get("PROCESSING", "RETRY_DELAY_SECONDS", fallback="2").strip())
         
-        # API Configuration
-        api_base_url = config.get("API", "BASE_URL").strip()
+        # API Configuration - base URL from environment variable
+        api_base_url = os.environ.get("STOREYES_BASE_URL")
+        if not api_base_url:
+            logging.error("STOREYES_BASE_URL environment variable not found!")
+            logging.error("Please set STOREYES_BASE_URL environment variable")
+            sys.exit(1)
+        api_base_url = api_base_url.strip()
         alerts_endpoint = config.get("API", "ALERTS_ENDPOINT").strip()
         secondary_video_endpoint = config.get("API", "SECONDARY_VIDEO_ENDPOINT").strip()
         
