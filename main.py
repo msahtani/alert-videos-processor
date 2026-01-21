@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional, Tuple
 
@@ -14,22 +15,13 @@ from api_client import APIClient
 from clip_extractor import ClipExtractor
 from s3_uploader import S3Uploader
 from email_sender import EmailSender
-
-
-def setup_logging(verbose=False):
-    """Configure logging based on verbose flag"""
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        stream=sys.stdout
-    )
+from logger_config import setup_logging, get_logger, PerformanceLogger
 
 
 def setup_aws_credentials(config):
     """Set up AWS credentials from environment variables"""
     import os
+    logger = get_logger(__name__)
     
     # Read credentials from environment variables
     access_key = os.environ.get("AWS_ACCESS_KEY_ID")
@@ -47,7 +39,7 @@ def setup_aws_credentials(config):
     if access_key and secret_key:
         os.environ["AWS_ACCESS_KEY_ID"] = access_key
         os.environ["AWS_SECRET_ACCESS_KEY"] = secret_key
-        logging.debug("AWS credentials loaded from environment variables")
+        logger.debug("AWS credentials loaded from environment variables")
     
     if region:
         os.environ["AWS_DEFAULT_REGION"] = region
@@ -56,18 +48,20 @@ def setup_aws_credentials(config):
 def check_aws_credentials():
     """Check if AWS credentials are available"""
     import os
+    logger = get_logger(__name__)
+    
     access_key = os.environ.get("AWS_ACCESS_KEY_ID")
     secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
     
     if not access_key or not secret_key:
-        logging.error("AWS credentials not found!")
-        logging.error("Please add credentials to config.conf:")
-        logging.error("  [AWS]")
-        logging.error("  ACCESS_KEY_ID = your-access-key-id")
-        logging.error("  SECRET_ACCESS_KEY = your-secret-access-key")
+        logger.error("AWS credentials not found!")
+        logger.error("Please add credentials to config.conf:")
+        logger.error("  [AWS]")
+        logger.error("  ACCESS_KEY_ID = your-access-key-id")
+        logger.error("  SECRET_ACCESS_KEY = your-secret-access-key")
         return False
     
-    logging.debug("AWS credentials configured")
+    logger.debug("AWS credentials configured")
     return True
 
 
@@ -99,11 +93,14 @@ def process_alert(alert: Dict, clip_extractor: ClipExtractor,
     alert_id = alert.get("id")
     alert_date = alert.get("alertDate")
     
-    if not alert_id or not alert_date:
-        logging.error(f"Alert missing required fields (id or alertDate): {alert}")
-        return False, None
+    # Get logger with alert context
+    logger = get_logger(__name__, {"alert_id": alert_id})
     
-    logging.info(f"Processing alert {alert_id} with date {alert_date}")
+    if not alert_id or not alert_date:
+        logger.error(f"Alert missing required fields (id or alertDate): {alert}")
+        return False, None, None
+    
+    logger.info(f"Processing alert with date {alert_date}", extra={"alert_date": alert_date})
     
     # Extract clip with retry logic for network failures
     mp4_file = None
@@ -111,20 +108,28 @@ def process_alert(alert: Dict, clip_extractor: ClipExtractor,
     retry_delay = retry_delay_seconds
     
     for attempt in range(max_retries):
-        mp4_file, thumbnail_file = clip_extractor.extract_clip(alert_date)
+        with PerformanceLogger(logger, "extract_clip", attempt=attempt + 1):
+            mp4_file, thumbnail_file = clip_extractor.extract_clip(alert_date)
+        
         if mp4_file:
             break
         
         if attempt < max_retries - 1:
-            logging.warning(f"Clip extraction failed (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay} seconds...")
+            logger.warning(
+                f"Clip extraction failed, retrying in {retry_delay} seconds...",
+                extra={"attempt": attempt + 1, "max_retries": max_retries}
+            )
             time.sleep(retry_delay)
             retry_delay *= 2  # Exponential backoff
         else:
-            logging.error(f"Failed to extract clip for alert {alert_id} after {max_retries} attempts")
+            logger.error(
+                f"Failed to extract clip after {max_retries} attempts",
+                extra={"max_retries": max_retries}
+            )
             return False, None, None
     
     if not mp4_file:
-        logging.error(f"Failed to extract clip for alert {alert_id}")
+        logger.error("Failed to extract clip")
         return False, None, None
     
     # Generate timestamp for S3 key (from alert_date - must use alertDate, not current date)
@@ -135,16 +140,18 @@ def process_alert(alert: Dict, clip_extractor: ClipExtractor,
         else:
             alert_time = alert_time.astimezone(timezone.utc)
         timestamp = alert_time.strftime('%Y%m%d_%H%M%S')
-        logging.debug(f"Generated timestamp from alertDate {alert_date}: {timestamp}")
+        logger.debug(f"Generated timestamp from alertDate", extra={"timestamp": timestamp})
     except Exception as e:
-        logging.error(f"Failed to parse alert date {alert_date}: {e}")
-        logging.error("Cannot generate clip name without valid alertDate. Skipping this alert.")
+        logger.error(f"Failed to parse alert date: {e}", extra={"alert_date": alert_date}, exc_info=True)
+        logger.error("Cannot generate clip name without valid alertDate. Skipping this alert.")
         return False, None, None
     
     # Upload video to S3
-    s3_url = s3_uploader.upload_file(mp4_file, timestamp)
+    with PerformanceLogger(logger, "upload_video_to_s3", timestamp=timestamp):
+        s3_url = s3_uploader.upload_file(mp4_file, timestamp)
+    
     if not s3_url:
-        logging.error(f"Failed to upload clip to S3 for alert {alert_id}")
+        logger.error("Failed to upload clip to S3")
         # Clean up local files
         s3_uploader.cleanup_local_file(mp4_file)
         if thumbnail_file:
@@ -154,16 +161,23 @@ def process_alert(alert: Dict, clip_extractor: ClipExtractor,
     # Upload thumbnail to S3 if available
     thumbnail_url = None
     if thumbnail_file:
-        thumbnail_url = s3_uploader.upload_thumbnail(thumbnail_file, timestamp)
+        with PerformanceLogger(logger, "upload_thumbnail_to_s3", timestamp=timestamp):
+            thumbnail_url = s3_uploader.upload_thumbnail(thumbnail_file, timestamp)
+        
         if thumbnail_url:
-            logging.info(f"Thumbnail uploaded: {thumbnail_url}")
+            logger.info(f"Thumbnail uploaded", extra={"thumbnail_url": thumbnail_url})
         else:
-            logging.warning(f"Failed to upload thumbnail for alert {alert_id}, continuing without thumbnail")
+            logger.warning("Failed to upload thumbnail, continuing without thumbnail")
     
     # Update API
     try:
-        api_client.update_secondary_video(alert_id, s3_url, thumbnail_url or "")
-        logging.info(f"Successfully processed alert {alert_id}")
+        with PerformanceLogger(logger, "update_api_secondary_video"):
+            api_client.update_secondary_video(alert_id, s3_url, thumbnail_url or "")
+        
+        logger.info(
+            "Successfully processed alert",
+            extra={"video_url": s3_url, "thumbnail_url": thumbnail_url}
+        )
         
         # Clean up local files after successful upload and API update
         s3_uploader.cleanup_local_file(mp4_file)
@@ -171,7 +185,7 @@ def process_alert(alert: Dict, clip_extractor: ClipExtractor,
             s3_uploader.cleanup_local_file(thumbnail_file)
         return True, s3_url, thumbnail_url
     except Exception as e:
-        logging.error(f"Failed to update API for alert {alert_id}: {e}")
+        logger.error(f"Failed to update API: {e}", exc_info=True)
         # Keep local file for debugging if API update fails
         return False, None, None
 
@@ -198,18 +212,35 @@ def main():
     
     args = parser.parse_args()
     
-    # Setup logging
-    setup_logging(verbose=args.verbose)
+    # Setup enterprise-grade logging
+    log_level = os.environ.get("LOG_LEVEL", "INFO")
+    log_dir = os.environ.get("LOG_DIR", "logs")
+    json_logging = os.environ.get("JSON_LOGGING", "false").lower() == "true"
+    
+    setup_logging(
+        log_level=log_level,
+        log_dir=log_dir,
+        log_file="alert_processor.log",
+        json_logging=json_logging,
+        verbose=args.verbose
+    )
+    
+    # Get logger with correlation ID for this run
+    correlation_id = str(uuid.uuid4())
+    logger = get_logger(__name__, {"correlation_id": correlation_id})
+    logger.info(f"Starting alert processor with correlation_id={correlation_id}")
     
     # Load configuration first
     try:
         config = load_config(args.config)
+        logger.info("Configuration loaded successfully")
     except Exception as e:
-        logging.error(f"Failed to load configuration: {e}")
+        logger.error(f"Failed to load configuration: {e}", exc_info=True)
         sys.exit(1)
     
     # Set up AWS credentials from config file
-    setup_aws_credentials(config)
+    with PerformanceLogger(logger, "setup_aws_credentials"):
+        setup_aws_credentials(config)
     
     # Check if using local source for loading videos
     local_source_dir = config.get("CLIP", "LOCAL_SOURCE_DIR", fallback=None)
@@ -217,11 +248,11 @@ def main():
         local_source_dir = local_source_dir.strip()
         if local_source_dir:
             local_source_dir = os.path.expandvars(local_source_dir)
-            logging.info(f"Loading source videos from local directory: {local_source_dir}")
+            logger.info(f"Loading source videos from local directory: {local_source_dir}")
     
     # AWS credentials are always required for uploading processed clips to S3
     if not check_aws_credentials():
-        logging.error("AWS credentials are required for uploading processed clips to S3")
+        logger.error("AWS credentials are required for uploading processed clips to S3")
         sys.exit(1)
     
     # Initialize components
@@ -229,8 +260,8 @@ def main():
         # AWS Configuration - region from environment variable
         aws_region = os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION")
         if not aws_region:
-            logging.error("AWS region not found in environment variables!")
-            logging.error("Please set AWS_DEFAULT_REGION or AWS_REGION environment variable")
+            logger.error("AWS region not found in environment variables!")
+            logger.error("Please set AWS_DEFAULT_REGION or AWS_REGION environment variable")
             sys.exit(1)
         aws_region = aws_region.strip()
         s3_bucket = config.get("AWS", "S3_BUCKET").strip()
@@ -260,8 +291,8 @@ def main():
         # API Configuration - base URL from environment variable
         api_base_url = os.environ.get("STOREYES_BASE_URL")
         if not api_base_url:
-            logging.error("STOREYES_BASE_URL environment variable not found!")
-            logging.error("Please set STOREYES_BASE_URL environment variable")
+            logger.error("STOREYES_BASE_URL environment variable not found!")
+            logger.error("Please set STOREYES_BASE_URL environment variable")
             sys.exit(1)
         api_base_url = api_base_url.strip()
         alerts_endpoint = config.get("API", "ALERTS_ENDPOINT").strip()
@@ -270,19 +301,160 @@ def main():
         # Email Configuration (optional)
         email_enabled = config.getboolean("EMAIL", "ENABLED", fallback=False)
         
+        logger.info("Configuration parsed successfully", extra={
+            "s3_bucket": s3_bucket,
+            "aws_region": aws_region,
+            "email_enabled": email_enabled
+        })
+        
     except Exception as e:
-        logging.error(f"Failed to read configuration: {e}")
+        logger.error(f"Failed to read configuration: {e}", exc_info=True)
         sys.exit(1)
     
     # Initialize clients
     api_client = APIClient(api_base_url, alerts_endpoint, secondary_video_endpoint)
     
+    # Check for outcome-comparator task completion before processing alerts
+    logger.info("Checking for outcome-comparator task completion...")
+    while True:
+        try:
+            with PerformanceLogger(logger, "check_tasks"):
+                tasks_data = api_client.get_tasks()
+            
+            tasks = tasks_data.get("tasks", [])
+            
+            if not tasks:
+                logger.info("No tasks found, waiting 300 seconds before retry...")
+                time.sleep(300)
+                continue
+            
+            # Find outcome-comparator task started within the last hour
+            outcome_comparator_task = None
+            current_time = datetime.now(timezone.utc)
+            
+            for task in tasks:
+                if task.get("type") == "outcome-comparator":
+                    started_at_str = task.get("started_at")
+                    if started_at_str:
+                        try:
+                            # Parse started_at timestamp
+                            started_at = datetime.fromisoformat(started_at_str.replace('Z', '+00:00'))
+                            if started_at.tzinfo is None:
+                                started_at = started_at.replace(tzinfo=timezone.utc)
+                            else:
+                                started_at = started_at.astimezone(timezone.utc)
+                            
+                            # Check if started within the last hour
+                            time_diff = current_time - started_at
+                            if time_diff.total_seconds() < 3600:  # Less than 1 hour (3600 seconds)
+                                outcome_comparator_task = task
+                                logger.debug(
+                                    f"Found outcome-comparator task started within last hour",
+                                    extra={
+                                        "task_id": task.get("task_id"),
+                                        "started_at": started_at_str,
+                                        "hours_ago": time_diff.total_seconds() / 3600
+                                    }
+                                )
+                                break
+                            else:
+                                logger.debug(
+                                    f"Skipping outcome-comparator task (started more than 1 hour ago)",
+                                    extra={
+                                        "task_id": task.get("task_id"),
+                                        "started_at": started_at_str,
+                                        "hours_ago": time_diff.total_seconds() / 3600
+                                    }
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to parse started_at for task: {e}",
+                                extra={"task_id": task.get("task_id"), "started_at": started_at_str},
+                                exc_info=True
+                            )
+                    else:
+                        # If no started_at, consider the task (backward compatibility)
+                        outcome_comparator_task = task
+                        logger.debug(
+                            f"Found outcome-comparator task without started_at (using it)",
+                            extra={"task_id": task.get("task_id")}
+                        )
+                        break
+            
+            if outcome_comparator_task:
+                task_status = outcome_comparator_task.get("status")
+                task_id = outcome_comparator_task.get("task_id")
+                started_at_str = outcome_comparator_task.get("started_at")
+                
+                logger.info(
+                    f"Found outcome-comparator task",
+                    extra={"task_id": task_id, "status": task_status, "started_at": started_at_str}
+                )
+                
+                if task_status == "completed":
+                    logger.info("Outcome-comparator task is completed. Waiting 60 seconds before processing alerts...")
+                    time.sleep(60)
+                    break
+                else:
+                    logger.info(
+                        f"Outcome-comparator task status is '{task_status}', waiting 300 seconds before checking status endpoint...",
+                        extra={"task_id": task_id, "status": task_status}
+                    )
+                    time.sleep(300)
+                    
+                    # Check status endpoint
+                    try:
+                        with PerformanceLogger(logger, "check_task_status", task_id=task_id):
+                            status_data = api_client.get_task_status(task_id)
+                        
+                        status = status_data.get("status")
+                        logger.info(
+                            f"Task status from status endpoint",
+                            extra={"task_id": task_id, "status": status}
+                        )
+                        
+                        if status == "completed":
+                            logger.info("Outcome-comparator task is completed. Waiting 60 seconds before processing alerts...")
+                            time.sleep(60)
+                            break
+                        else:
+                            logger.info(
+                                f"Task status is '{status}', waiting 300 seconds before retry...",
+                                extra={"task_id": task_id, "status": status}
+                            )
+                            time.sleep(300)
+                            continue
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to check task status: {e}",
+                            extra={"task_id": task_id},
+                            exc_info=True
+                        )
+                        logger.info("Waiting 300 seconds before retry...")
+                        time.sleep(300)
+                        continue
+            else:
+                logger.info(
+                    "Outcome-comparator task not found or not started within last hour, waiting 300 seconds before retry...",
+                    extra={"current_time": current_time.isoformat()}
+                )
+                time.sleep(300)
+                continue
+                
+        except Exception as e:
+            logger.error(f"Failed to check tasks: {e}", exc_info=True)
+            logger.info("Waiting 300 seconds before retry...")
+            time.sleep(300)
+            continue
+    
+    logger.info("Proceeding with alert processing...")
+    
     # Log the workflow configuration
     if local_source_dir:
-        logging.info(f"Source: Loading video chunks from local directory '{local_source_dir}'")
+        logger.info(f"Source: Loading video chunks from local directory '{local_source_dir}'")
     else:
-        logging.info(f"Source: Loading video chunks from S3 bucket '{s3_bucket}/{s3_prefix}'")
-    logging.info(f"Destination: Uploading processed clips to S3 bucket '{s3_bucket}/{s3_upload_prefix}'")
+        logger.info(f"Source: Loading video chunks from S3 bucket '{s3_bucket}/{s3_prefix}'")
+    logger.info(f"Destination: Uploading processed clips to S3 bucket '{s3_bucket}/{s3_upload_prefix}'")
     
     clip_extractor = ClipExtractor(
         region=aws_region,
@@ -319,10 +491,10 @@ def main():
                 to_emails=to_emails,
                 use_tls=use_tls
             )
-            logging.info(f"Email notifications enabled. Sending to: {', '.join(to_emails)}")
+            logger.info(f"Email notifications enabled. Sending to: {', '.join(to_emails)}")
         except Exception as e:
-            logging.warning(f"Failed to initialize email sender: {e}")
-            logging.warning("Continuing without email notifications...")
+            logger.warning(f"Failed to initialize email sender: {e}", exc_info=True)
+            logger.warning("Continuing without email notifications...")
             email_sender = None
     
     # Determine date to fetch alerts for
@@ -348,25 +520,26 @@ def main():
             
             # Format as ISO string with 'Z' to indicate UTC for API
             fetch_date = provided_date_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
-            logging.info(f"Parsed date {args.date} (UTC+1) as UTC: {fetch_date}")
+            logger.info(f"Parsed date {args.date} (UTC+1) as UTC: {fetch_date}")
         except Exception as e:
-            logging.error(f"Failed to parse date '{args.date}': {e}")
-            logging.error("Please provide date in ISO format (e.g., 2025-12-10T12:00:00)")
+            logger.error(f"Failed to parse date '{args.date}': {e}", exc_info=True)
+            logger.error("Please provide date in ISO format (e.g., 2025-12-10T12:00:00)")
             sys.exit(1)
     else:
         # Use current date at midnight UTC
         fetch_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%dT%H:%M:%SZ')
-        logging.info(f"No date provided, using current date: {fetch_date}")
+        logger.info(f"No date provided, using current date: {fetch_date}")
     
     # Fetch alerts
     try:
-        alerts = api_client.get_alerts(fetch_date)
+        with PerformanceLogger(logger, "fetch_alerts", fetch_date=fetch_date):
+            alerts = api_client.get_alerts(fetch_date)
     except Exception as e:
-        logging.error(f"Failed to fetch alerts: {e}")
+        logger.error(f"Failed to fetch alerts: {e}", exc_info=True)
         sys.exit(1)
     
     if not alerts:
-        logging.info(f"No alerts found for date {fetch_date}")
+        logger.info(f"No alerts found for date {fetch_date}")
         sys.exit(0)
     
     # Sort alerts by alertDate (oldest first)
@@ -388,11 +561,11 @@ def main():
     
     try:
         alerts.sort(key=get_alert_datetime)
-        logging.debug(f"Sorted {len(alerts)} alerts by alertDate")
+        logger.debug(f"Sorted {len(alerts)} alerts by alertDate")
     except Exception as e:
-        logging.warning(f"Failed to sort alerts by alertDate: {e}. Processing in original order.")
+        logger.warning(f"Failed to sort alerts by alertDate: {e}. Processing in original order.", exc_info=True)
     
-    logging.info(f"Found {len(alerts)} alerts to process")
+    logger.info(f"Found {len(alerts)} alerts to process", extra={"alert_count": len(alerts)})
     
     # Process each alert
     successful = 0
@@ -400,25 +573,45 @@ def main():
     processed_alerts = []  # List of (alert, video_url, thumbnail_url) tuples for successful alerts
     
     for alert in alerts:
-        success, video_url, thumbnail_url = process_alert(
-            alert, clip_extractor, s3_uploader, api_client,
-            max_retries=max_retries, retry_delay_seconds=retry_delay_seconds
-        )
+        alert_id = alert.get("id")
+        alert_logger = get_logger(__name__, {"correlation_id": correlation_id, "alert_id": alert_id})
+        
+        with PerformanceLogger(alert_logger, f"process_alert_{alert_id}", alert_id=alert_id):
+            success, video_url, thumbnail_url = process_alert(
+                alert, clip_extractor, s3_uploader, api_client,
+                max_retries=max_retries, retry_delay_seconds=retry_delay_seconds
+            )
+        
         if success:
             successful += 1
             processed_alerts.append((alert, video_url, thumbnail_url))
+            alert_logger.info(
+                f"Alert processed successfully",
+                extra={"alert_id": alert_id, "video_url": video_url}
+            )
         else:
             failed += 1
+            alert_logger.error(
+                f"Alert processing failed",
+                extra={"alert_id": alert_id}
+            )
     
-    logging.info(f"Processing complete: {successful} successful, {failed} failed")
+    logger.info(
+        f"Processing complete",
+        extra={"successful": successful, "failed": failed, "total": len(alerts)}
+    )
     
     # Send batch email with all processed alerts if email sender is configured
     if email_sender and processed_alerts:
-        logging.info(f"Sending batch email notification for {len(processed_alerts)} alert(s)")
-        email_sender.send_batch_alert_email(processed_alerts)
+        logger.info(f"Sending batch email notification for {len(processed_alerts)} alert(s)")
+        with PerformanceLogger(logger, "send_batch_email", alert_count=len(processed_alerts)):
+            email_sender.send_batch_alert_email(processed_alerts)
     
     if failed > 0:
+        logger.warning(f"Exiting with error code due to {failed} failed alerts")
         sys.exit(1)
+    
+    logger.info("Alert processor completed successfully")
 
 
 if __name__ == "__main__":
