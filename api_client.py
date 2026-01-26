@@ -13,7 +13,9 @@ from logger_config import get_logger, PerformanceLogger
 class APIClient:
     """Client for interacting with the alerts API"""
     
-    def __init__(self, base_url: str, alerts_endpoint: str, secondary_video_endpoint: str):
+    def __init__(self, base_url: str, alerts_endpoint: str, secondary_video_endpoint: str,
+                 tasks_api_base_url: Optional[str] = None, tasks_endpoint: Optional[str] = None,
+                 task_status_endpoint: Optional[str] = None, store_code: Optional[str] = None):
         """
         Initialize API client
 
@@ -21,10 +23,18 @@ class APIClient:
             base_url: Base URL of the API (e.g., http://49.13.89.74:8080)
             alerts_endpoint: Endpoint for fetching alerts (e.g., /api/alerts)
             secondary_video_endpoint: Endpoint template for updating secondary video (e.g., /api/alerts/{alert_id}/secondary-video)
+            tasks_api_base_url: Base URL for tasks API (e.g., https://u80w48ofg1.execute-api.eu-south-2.amazonaws.com)
+            tasks_endpoint: Endpoint for fetching tasks (e.g., /api/tasks)
+            task_status_endpoint: Endpoint template for task status (e.g., /api/status/{task_id})
+            store_code: Store code to use in query parameters
         """
         self.base_url = base_url.rstrip('/')
         self.alerts_endpoint = alerts_endpoint
         self.secondary_video_endpoint = secondary_video_endpoint
+        self.tasks_api_base_url = tasks_api_base_url.rstrip('/') if tasks_api_base_url else None
+        self.tasks_endpoint = tasks_endpoint or "/api/tasks"
+        self.task_status_endpoint = task_status_endpoint or "/api/status/{task_id}"
+        self.store_code = store_code
         self.logger = get_logger(__name__)
     
     def get_alerts(self, date: str) -> List[Dict]:
@@ -113,13 +123,22 @@ class APIClient:
         Raises:
             requests.RequestException: If the API request fails
         """
-        url = "http://13.49.65.46:8080/api/tasks"
+        if not self.tasks_api_base_url:
+            raise ValueError("Tasks API base URL not configured")
         
-        self.logger.info(f"Fetching tasks from {url}")
+        url = f"{self.tasks_api_base_url}{self.tasks_endpoint}"
+        
+        # Build query parameters
+        params = {}
+        if self.store_code:
+            params["store_code"] = self.store_code
+        params["type"] = "outcome-comparator"
+        
+        self.logger.info(f"Fetching tasks from {url}", extra={"params": params})
         
         try:
             with PerformanceLogger(self.logger, "get_tasks"):
-                response = requests.get(url, timeout=30)
+                response = requests.get(url, params=params, timeout=30)
                 response.raise_for_status()
                 tasks_data = response.json()
             
@@ -143,13 +162,21 @@ class APIClient:
         Raises:
             requests.RequestException: If the API request fails
         """
-        url = f"http://13.49.65.46:8080/api/status/{task_id}"
+        if not self.tasks_api_base_url:
+            raise ValueError("Tasks API base URL not configured")
         
-        self.logger.info(f"Fetching task status from {url}", extra={"task_id": task_id})
+        url = f"{self.tasks_api_base_url}{self.task_status_endpoint.format(task_id=task_id)}"
+        
+        # Build query parameters
+        params = {}
+        if self.store_code:
+            params["store_code"] = self.store_code
+        
+        self.logger.info(f"Fetching task status from {url}", extra={"task_id": task_id, "params": params})
         
         try:
             with PerformanceLogger(self.logger, "get_task_status", task_id=task_id):
-                response = requests.get(url, timeout=30)
+                response = requests.get(url, params=params, timeout=30)
                 response.raise_for_status()
                 status_data = response.json()
             

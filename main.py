@@ -298,13 +298,25 @@ def main():
         alerts_endpoint = config.get("API", "ALERTS_ENDPOINT").strip()
         secondary_video_endpoint = config.get("API", "SECONDARY_VIDEO_ENDPOINT").strip()
         
+        # Tasks API Configuration
+        tasks_api_base_url = config.get("API", "TASKS_API_BASE_URL", fallback=None)
+        if tasks_api_base_url:
+            tasks_api_base_url = tasks_api_base_url.strip()
+        tasks_endpoint = config.get("API", "TASKS_ENDPOINT", fallback="/api/tasks").strip()
+        task_status_endpoint = config.get("API", "TASK_STATUS_ENDPOINT", fallback="/api/status/{task_id}").strip()
+        store_code = config.get("API", "STORE_CODE", fallback=None)
+        if store_code:
+            store_code = store_code.strip()
+        
         # Email Configuration (optional)
         email_enabled = config.getboolean("EMAIL", "ENABLED", fallback=False)
         
         logger.info("Configuration parsed successfully", extra={
             "s3_bucket": s3_bucket,
             "aws_region": aws_region,
-            "email_enabled": email_enabled
+            "email_enabled": email_enabled,
+            "tasks_api_configured": tasks_api_base_url is not None,
+            "store_code": store_code
         })
         
     except Exception as e:
@@ -312,7 +324,15 @@ def main():
         sys.exit(1)
     
     # Initialize clients
-    api_client = APIClient(api_base_url, alerts_endpoint, secondary_video_endpoint)
+    api_client = APIClient(
+        base_url=api_base_url,
+        alerts_endpoint=alerts_endpoint,
+        secondary_video_endpoint=secondary_video_endpoint,
+        tasks_api_base_url=tasks_api_base_url,
+        tasks_endpoint=tasks_endpoint,
+        task_status_endpoint=task_status_endpoint,
+        store_code=store_code
+    )
     
     # Check for outcome-comparator task completion before processing alerts
     logger.info("Checking for outcome-comparator task completion...")
