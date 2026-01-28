@@ -32,14 +32,24 @@ class LoggingTqdm(tqdm):
     def update(self, n=1):
         result = super().update(n)
         if self.resume_logger and self.n > 0:
-            # Log progress update
-            progress_str = self.format_meter(
-                self.n, self.total, self.elapsed, 
-                self.ncols, self.desc, self.unit, self.unit_scale, 
-                self.rate, self.bar_format, self.postfix, 
-                self.unit_divisor
-            )
-            self.resume_logger.info(progress_str.strip())
+            # Log progress update - use str() representation which tqdm provides safely
+            try:
+                # Use tqdm's string representation which handles all attributes safely
+                progress_str = str(self)
+                if progress_str:
+                    self.resume_logger.info(progress_str.strip())
+            except Exception:
+                # Fallback to simple logging if formatting fails
+                try:
+                    elapsed = getattr(self, 'elapsed', 0)
+                    if elapsed == 0 and hasattr(self, 'start_t') and hasattr(self, '_time'):
+                        elapsed = self._time() - self.start_t
+                    elapsed_str = f"{int(elapsed//60):02d}:{int(elapsed%60):02d}" if elapsed > 0 else "00:00"
+                    total_str = f"/{self.total}" if self.total else ""
+                    self.resume_logger.info(f"{self.desc}: {self.n}{total_str} {self.unit} [{elapsed_str}]")
+                except Exception:
+                    # Ultimate fallback
+                    self.resume_logger.info(f"{self.desc}: {self.n} {self.unit}")
         return result
     
     def set_description(self, desc=None, refresh=True):
