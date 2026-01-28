@@ -16,6 +16,50 @@ from clip_extractor import ClipExtractor
 from s3_uploader import S3Uploader
 from email_sender import EmailSender
 from logger_config import setup_logging, get_logger, PerformanceLogger
+from tqdm import tqdm
+from pathlib import Path
+
+
+class LoggingTqdm(tqdm):
+    """Custom tqdm that logs progress updates to resume log file"""
+    
+    def __init__(self, *args, resume_logger=None, **kwargs):
+        self.resume_logger = resume_logger
+        super().__init__(*args, **kwargs)
+        if self.resume_logger:
+            self.resume_logger.info(f"Started: {self.desc}")
+    
+    def update(self, n=1):
+        result = super().update(n)
+        if self.resume_logger and self.n > 0:
+            # Log progress update
+            progress_str = self.format_meter(
+                self.n, self.total, self.elapsed, 
+                self.ncols, self.desc, self.unit, self.unit_scale, 
+                self.rate, self.bar_format, self.postfix, 
+                self.unit_divisor
+            )
+            self.resume_logger.info(progress_str.strip())
+        return result
+    
+    def set_description(self, desc=None, refresh=True):
+        result = super().set_description(desc, refresh=refresh)
+        if self.resume_logger and desc:
+            self.resume_logger.info(f"Status: {desc}")
+        return result
+    
+    def set_postfix(self, ordered_dict=None, refresh=True, **kwargs):
+        result = super().set_postfix(ordered_dict, refresh=refresh, **kwargs)
+        if self.resume_logger and (ordered_dict or kwargs):
+            postfix_str = self.postfix if hasattr(self, 'postfix') else ""
+            if postfix_str:
+                self.resume_logger.info(f"Postfix: {postfix_str}")
+        return result
+    
+    def close(self):
+        if self.resume_logger:
+            self.resume_logger.info(f"Completed: {self.desc}")
+        return super().close()
 
 
 def setup_aws_credentials(config):
@@ -212,8 +256,8 @@ def main():
     
     args = parser.parse_args()
     
-    # Setup enterprise-grade logging
-    log_level = os.environ.get("LOG_LEVEL", "INFO")
+    # Setup minimal logging (errors to file, suppress console output for progress bars)
+    log_level = os.environ.get("LOG_LEVEL", "INFO")  # Log INFO+ to file
     log_dir = os.environ.get("LOG_DIR", "logs")
     json_logging = os.environ.get("JSON_LOGGING", "false").lower() == "true"
     
@@ -225,10 +269,25 @@ def main():
         verbose=args.verbose
     )
     
-    # Get logger with correlation ID for this run
+    # Setup resume log file for progress bar updates
+    log_path = Path(log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
+    resume_log_file = log_path / "alert_processor_resume.log"
+    resume_log_handler = logging.FileHandler(resume_log_file, encoding="utf-8")
+    resume_log_handler.setLevel(logging.INFO)
+    resume_log_formatter = logging.Formatter(
+        fmt="%(asctime)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    resume_log_handler.setFormatter(resume_log_formatter)
+    resume_logger = logging.getLogger("resume")
+    resume_logger.setLevel(logging.INFO)
+    resume_logger.addHandler(resume_log_handler)
+    resume_logger.propagate = False  # Don't propagate to root logger
+    
+    # Get logger with correlation ID for this run (for file logging only)
     correlation_id = str(uuid.uuid4())
     logger = get_logger(__name__, {"correlation_id": correlation_id})
-    logger.info(f"Starting alert processor with correlation_id={correlation_id}")
     
     # Load configuration first
     try:
@@ -335,139 +394,89 @@ def main():
     )
     
     # Check for outcome-comparator task completion before processing alerts
-    logger.info("Checking for outcome-comparator task completion...")
-    while True:
-        try:
-            with PerformanceLogger(logger, "check_tasks"):
+    with LoggingTqdm(desc="Waiting for outcome-comparator task", unit="check", 
+                     bar_format='{desc}: {elapsed}', resume_logger=resume_logger) as pbar:
+        while True:
+            try:
                 tasks_data = api_client.get_tasks()
-            
-            tasks = tasks_data.get("tasks", [])
-            
-            if not tasks:
-                logger.info("No tasks found, waiting 300 seconds before retry...")
-                time.sleep(300)
-                continue
-            
-            # Find outcome-comparator task started within the last hour
-            outcome_comparator_task = None
-            current_time = datetime.now(timezone.utc)
-            
-            for task in tasks:
-                if task.get("type") == "outcome-comparator":
-                    started_at_str = task.get("started_at")
-                    if started_at_str:
+                tasks = tasks_data.get("tasks", [])
+                
+                if not tasks:
+                    pbar.set_description("Waiting for outcome-comparator task (no tasks found)")
+                    for _ in range(30):  # 300 seconds = 30 * 10 second updates
+                        time.sleep(10)
+                        pbar.update(1)
+                    continue
+                
+                # Find outcome-comparator task started within the last hour
+                outcome_comparator_task = None
+                current_time = datetime.now(timezone.utc)
+                
+                for task in tasks:
+                    if task.get("type") == "outcome-comparator":
+                        started_at_str = task.get("started_at")
+                        if started_at_str:
+                            try:
+                                started_at = datetime.fromisoformat(started_at_str.replace('Z', '+00:00'))
+                                if started_at.tzinfo is None:
+                                    started_at = started_at.replace(tzinfo=timezone.utc)
+                                else:
+                                    started_at = started_at.astimezone(timezone.utc)
+                                
+                                time_diff = current_time - started_at
+                                if time_diff.total_seconds() < 3600:
+                                    outcome_comparator_task = task
+                                    break
+                            except Exception:
+                                pass
+                        else:
+                            outcome_comparator_task = task
+                            break
+                
+                if outcome_comparator_task:
+                    task_status = outcome_comparator_task.get("status")
+                    task_id = outcome_comparator_task.get("task_id")
+                    
+                    if task_status == "completed":
+                        pbar.set_description("Task completed, waiting 60s...")
+                        for _ in range(6):  # 60 seconds = 6 * 10 second updates
+                            time.sleep(10)
+                            pbar.update(1)
+                        break
+                    else:
+                        pbar.set_description(f"Task {task_id[:8]}... status: {task_status}")
+                        for _ in range(30):  # 300 seconds
+                            time.sleep(10)
+                            pbar.update(1)
+                        
                         try:
-                            # Parse started_at timestamp
-                            started_at = datetime.fromisoformat(started_at_str.replace('Z', '+00:00'))
-                            if started_at.tzinfo is None:
-                                started_at = started_at.replace(tzinfo=timezone.utc)
-                            else:
-                                started_at = started_at.astimezone(timezone.utc)
+                            status_data = api_client.get_task_status(task_id)
+                            status = status_data.get("status")
                             
-                            # Check if started within the last hour
-                            time_diff = current_time - started_at
-                            if time_diff.total_seconds() < 3600:  # Less than 1 hour (3600 seconds)
-                                outcome_comparator_task = task
-                                logger.debug(
-                                    f"Found outcome-comparator task started within last hour",
-                                    extra={
-                                        "task_id": task.get("task_id"),
-                                        "started_at": started_at_str,
-                                        "hours_ago": time_diff.total_seconds() / 3600
-                                    }
-                                )
+                            if status == "completed":
+                                pbar.set_description("Task completed, waiting 60s...")
+                                for _ in range(6):
+                                    time.sleep(10)
+                                    pbar.update(1)
                                 break
                             else:
-                                logger.debug(
-                                    f"Skipping outcome-comparator task (started more than 1 hour ago)",
-                                    extra={
-                                        "task_id": task.get("task_id"),
-                                        "started_at": started_at_str,
-                                        "hours_ago": time_diff.total_seconds() / 3600
-                                    }
-                                )
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to parse started_at for task: {e}",
-                                extra={"task_id": task.get("task_id"), "started_at": started_at_str},
-                                exc_info=True
-                            )
-                    else:
-                        # If no started_at, consider the task (backward compatibility)
-                        outcome_comparator_task = task
-                        logger.debug(
-                            f"Found outcome-comparator task without started_at (using it)",
-                            extra={"task_id": task.get("task_id")}
-                        )
-                        break
-            
-            if outcome_comparator_task:
-                task_status = outcome_comparator_task.get("status")
-                task_id = outcome_comparator_task.get("task_id")
-                started_at_str = outcome_comparator_task.get("started_at")
-                
-                logger.info(
-                    f"Found outcome-comparator task",
-                    extra={"task_id": task_id, "status": task_status, "started_at": started_at_str}
-                )
-                
-                if task_status == "completed":
-                    logger.info("Outcome-comparator task is completed. Waiting 60 seconds before processing alerts...")
-                    time.sleep(60)
-                    break
-                else:
-                    logger.info(
-                        f"Outcome-comparator task status is '{task_status}', waiting 300 seconds before checking status endpoint...",
-                        extra={"task_id": task_id, "status": task_status}
-                    )
-                    time.sleep(300)
-                    
-                    # Check status endpoint
-                    try:
-                        with PerformanceLogger(logger, "check_task_status", task_id=task_id):
-                            status_data = api_client.get_task_status(task_id)
-                        
-                        status = status_data.get("status")
-                        logger.info(
-                            f"Task status from status endpoint",
-                            extra={"task_id": task_id, "status": status}
-                        )
-                        
-                        if status == "completed":
-                            logger.info("Outcome-comparator task is completed. Waiting 60 seconds before processing alerts...")
-                            time.sleep(60)
-                            break
-                        else:
-                            logger.info(
-                                f"Task status is '{status}', waiting 300 seconds before retry...",
-                                extra={"task_id": task_id, "status": status}
-                            )
-                            time.sleep(300)
+                                continue
+                        except Exception:
                             continue
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to check task status: {e}",
-                            extra={"task_id": task_id},
-                            exc_info=True
-                        )
-                        logger.info("Waiting 300 seconds before retry...")
-                        time.sleep(300)
-                        continue
-            else:
-                logger.info(
-                    "Outcome-comparator task not found or not started within last hour, waiting 300 seconds before retry...",
-                    extra={"current_time": current_time.isoformat()}
-                )
-                time.sleep(300)
+                else:
+                    pbar.set_description("Waiting for outcome-comparator task (not found)")
+                    for _ in range(30):
+                        time.sleep(10)
+                        pbar.update(1)
+                    continue
+                    
+            except Exception as e:
+                logger.error(f"Failed to check tasks: {e}", exc_info=True)
+                pbar.set_description("Error checking tasks, retrying...")
+                for _ in range(30):
+                    time.sleep(10)
+                    pbar.update(1)
                 continue
-                
-        except Exception as e:
-            logger.error(f"Failed to check tasks: {e}", exc_info=True)
-            logger.info("Waiting 300 seconds before retry...")
-            time.sleep(300)
-            continue
-    
-    logger.info("Proceeding with alert processing...")
     
     # Log the workflow configuration
     if local_source_dir:
@@ -585,53 +594,51 @@ def main():
     except Exception as e:
         logger.warning(f"Failed to sort alerts by alertDate: {e}. Processing in original order.", exc_info=True)
     
-    logger.info(f"Found {len(alerts)} alerts to process", extra={"alert_count": len(alerts)})
-    
-    # Process each alert
+    # Process each alert with progress bar
     successful = 0
     failed = 0
     processed_alerts = []  # List of (alert, video_url, thumbnail_url) tuples for successful alerts
     
-    for alert in alerts:
-        alert_id = alert.get("id")
-        alert_logger = get_logger(__name__, {"correlation_id": correlation_id, "alert_id": alert_id})
-        
-        with PerformanceLogger(alert_logger, f"process_alert_{alert_id}", alert_id=alert_id):
-            success, video_url, thumbnail_url = process_alert(
-                alert, clip_extractor, s3_uploader, api_client,
-                max_retries=max_retries, retry_delay_seconds=retry_delay_seconds
-            )
-        
-        if success:
-            successful += 1
-            processed_alerts.append((alert, video_url, thumbnail_url))
-            alert_logger.info(
-                f"Alert processed successfully",
-                extra={"alert_id": alert_id, "video_url": video_url}
-            )
-        else:
-            failed += 1
-            alert_logger.error(
-                f"Alert processing failed",
-                extra={"alert_id": alert_id}
-            )
-    
-    logger.info(
-        f"Processing complete",
-        extra={"successful": successful, "failed": failed, "total": len(alerts)}
-    )
+    with LoggingTqdm(total=len(alerts), desc="Processing alerts", unit="alert", 
+                     bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
+                     resume_logger=resume_logger) as pbar:
+        for alert in alerts:
+            alert_id = alert.get("id")
+            alert_logger = get_logger(__name__, {"correlation_id": correlation_id, "alert_id": alert_id})
+            
+            pbar.set_description(f"Processing alert {alert_id}")
+            
+            with PerformanceLogger(alert_logger, f"process_alert_{alert_id}", alert_id=alert_id):
+                success, video_url, thumbnail_url = process_alert(
+                    alert, clip_extractor, s3_uploader, api_client,
+                    max_retries=max_retries, retry_delay_seconds=retry_delay_seconds
+                )
+            
+            if success:
+                successful += 1
+                processed_alerts.append((alert, video_url, thumbnail_url))
+                pbar.set_postfix({"✓": successful, "✗": failed})
+            else:
+                failed += 1
+                pbar.set_postfix({"✓": successful, "✗": failed})
+                logger.error(f"Alert {alert_id} processing failed", extra={"alert_id": alert_id})
+            
+            pbar.update(1)
     
     # Send batch email with all processed alerts if email sender is configured
     if email_sender and processed_alerts:
-        logger.info(f"Sending batch email notification for {len(processed_alerts)} alert(s)")
-        with PerformanceLogger(logger, "send_batch_email", alert_count=len(processed_alerts)):
-            email_sender.send_batch_alert_email(processed_alerts)
+        with LoggingTqdm(desc="Sending email notification", total=1, 
+                         bar_format='{desc}: {elapsed}', resume_logger=resume_logger) as pbar:
+            with PerformanceLogger(logger, "send_batch_email", alert_count=len(processed_alerts)):
+                email_sender.send_batch_alert_email(processed_alerts)
+            pbar.update(1)
+    
+    # Final summary
+    print(f"\n✓ Completed: {successful} | ✗ Failed: {failed} | Total: {len(alerts)}")
     
     if failed > 0:
         logger.warning(f"Exiting with error code due to {failed} failed alerts")
         sys.exit(1)
-    
-    logger.info("Alert processor completed successfully")
 
 
 if __name__ == "__main__":
