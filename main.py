@@ -248,9 +248,10 @@ def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description="Process alerts and extract video clips")
     parser.add_argument(
-        "--date",
-        type=str,
-        help="Date in ISO format to fetch alerts (e.g., 2025-12-10T00:00:00). If not provided, uses current date."
+        "--date-cursor",
+        type=int,
+        default=None,
+        help="Days offset from today (negative values for past dates). -1: yesterday, -2: 2 days ago, etc. If not provided, uses current date."
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -262,6 +263,11 @@ def main():
         type=str,
         default="config.conf",
         help="Path to config file (default: config.conf)"
+    )
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="Skip waiting for outcome-comparator task completion and process alerts directly"
     )
     
     args = parser.parse_args()
@@ -404,89 +410,93 @@ def main():
     )
     
     # Check for outcome-comparator task completion before processing alerts
-    with LoggingTqdm(desc="Waiting for outcome-comparator task", unit="check", 
-                     bar_format='{desc}: {elapsed}', resume_logger=resume_logger) as pbar:
-        while True:
-            try:
-                tasks_data = api_client.get_tasks()
-                tasks = tasks_data.get("tasks", [])
-                
-                if not tasks:
-                    pbar.set_description("Waiting for outcome-comparator task (no tasks found)")
-                    for _ in range(30):  # 300 seconds = 30 * 10 second updates
-                        time.sleep(10)
-                        pbar.update(1)
-                    continue
-                
-                # Find outcome-comparator task started within the last hour
-                outcome_comparator_task = None
-                current_time = datetime.now(timezone.utc)
-                
-                for task in tasks:
-                    if task.get("type") == "outcome-comparator":
-                        started_at_str = task.get("started_at")
-                        if started_at_str:
-                            try:
-                                started_at = datetime.fromisoformat(started_at_str.replace('Z', '+00:00'))
-                                if started_at.tzinfo is None:
-                                    started_at = started_at.replace(tzinfo=timezone.utc)
-                                else:
-                                    started_at = started_at.astimezone(timezone.utc)
-                                
-                                time_diff = current_time - started_at
-                                if time_diff.total_seconds() < 3600:
-                                    outcome_comparator_task = task
-                                    break
-                            except Exception:
-                                pass
-                        else:
-                            outcome_comparator_task = task
-                            break
-                
-                if outcome_comparator_task:
-                    task_status = outcome_comparator_task.get("status")
-                    task_id = outcome_comparator_task.get("task_id")
+    if not args.no_wait:
+        logger.info("Waiting for outcome-comparator task completion before processing alerts")
+        with LoggingTqdm(desc="Waiting for outcome-comparator task", unit="check", 
+                         bar_format='{desc}: {elapsed}', resume_logger=resume_logger) as pbar:
+            while True:
+                try:
+                    tasks_data = api_client.get_tasks()
+                    tasks = tasks_data.get("tasks", [])
                     
-                    if task_status == "completed":
-                        pbar.set_description("Task completed, waiting 60s...")
-                        for _ in range(6):  # 60 seconds = 6 * 10 second updates
+                    if not tasks:
+                        pbar.set_description("Waiting for outcome-comparator task (no tasks found)")
+                        for _ in range(30):  # 300 seconds = 30 * 10 second updates
                             time.sleep(10)
                             pbar.update(1)
-                        break
-                    else:
-                        pbar.set_description(f"Task {task_id[:8]}... status: {task_status}")
-                        for _ in range(30):  # 300 seconds
-                            time.sleep(10)
-                            pbar.update(1)
-                        
-                        try:
-                            status_data = api_client.get_task_status(task_id)
-                            status = status_data.get("status")
-                            
-                            if status == "completed":
-                                pbar.set_description("Task completed, waiting 60s...")
-                                for _ in range(6):
-                                    time.sleep(10)
-                                    pbar.update(1)
-                                break
+                        continue
+                    
+                    # Find outcome-comparator task started within the last hour
+                    outcome_comparator_task = None
+                    current_time = datetime.now(timezone.utc)
+                    
+                    for task in tasks:
+                        if task.get("type") == "outcome-comparator":
+                            started_at_str = task.get("started_at")
+                            if started_at_str:
+                                try:
+                                    started_at = datetime.fromisoformat(started_at_str.replace('Z', '+00:00'))
+                                    if started_at.tzinfo is None:
+                                        started_at = started_at.replace(tzinfo=timezone.utc)
+                                    else:
+                                        started_at = started_at.astimezone(timezone.utc)
+                                    
+                                    time_diff = current_time - started_at
+                                    if time_diff.total_seconds() < 3600:
+                                        outcome_comparator_task = task
+                                        break
+                                except Exception:
+                                    pass
                             else:
+                                outcome_comparator_task = task
+                                break
+                    
+                    if outcome_comparator_task:
+                        task_status = outcome_comparator_task.get("status")
+                        task_id = outcome_comparator_task.get("task_id")
+                        
+                        if task_status == "completed":
+                            pbar.set_description("Task completed, waiting 60s...")
+                            for _ in range(6):  # 60 seconds = 6 * 10 second updates
+                                time.sleep(10)
+                                pbar.update(1)
+                            break
+                        else:
+                            pbar.set_description(f"Task {task_id[:8]}... status: {task_status}")
+                            for _ in range(30):  # 300 seconds
+                                time.sleep(10)
+                                pbar.update(1)
+                            
+                            try:
+                                status_data = api_client.get_task_status(task_id)
+                                status = status_data.get("status")
+                                
+                                if status == "completed":
+                                    pbar.set_description("Task completed, waiting 60s...")
+                                    for _ in range(6):
+                                        time.sleep(10)
+                                        pbar.update(1)
+                                    break
+                                else:
+                                    continue
+                            except Exception:
                                 continue
-                        except Exception:
-                            continue
-                else:
-                    pbar.set_description("Waiting for outcome-comparator task (not found)")
+                    else:
+                        pbar.set_description("Waiting for outcome-comparator task (not found)")
+                        for _ in range(30):
+                            time.sleep(10)
+                            pbar.update(1)
+                        continue
+                        
+                except Exception as e:
+                    logger.error(f"Failed to check tasks: {e}", exc_info=True)
+                    pbar.set_description("Error checking tasks, retrying...")
                     for _ in range(30):
                         time.sleep(10)
                         pbar.update(1)
                     continue
-                    
-            except Exception as e:
-                logger.error(f"Failed to check tasks: {e}", exc_info=True)
-                pbar.set_description("Error checking tasks, retrying...")
-                for _ in range(30):
-                    time.sleep(10)
-                    pbar.update(1)
-                continue
+    else:
+        logger.info("Skipping wait for outcome-comparator task (--no-wait flag enabled)")
     
     # Log the workflow configuration
     if local_source_dir:
@@ -537,37 +547,22 @@ def main():
             email_sender = None
     
     # Determine date to fetch alerts for
-    if args.date:
-        # Parse the provided date - user provides date in UTC+1 timezone
-        try:
-            # Try to parse the date string
-            if 'T' in args.date:
-                # ISO format with time
-                provided_date = datetime.fromisoformat(args.date.replace('Z', '+00:00'))
-            else:
-                # Date only, assume midnight UTC+1
-                provided_date = datetime.fromisoformat(args.date + 'T00:00:00+01:00')
-            
-            # Ensure timezone-aware
-            if provided_date.tzinfo is None:
-                # If no timezone info, assume UTC+1 (user's local timezone)
-                utc_plus_one = timezone(timedelta(hours=1))
-                provided_date = provided_date.replace(tzinfo=utc_plus_one)
-            
-            # Convert UTC+1 to UTC (producer timestamp timezone)
-            provided_date_utc = provided_date.astimezone(timezone.utc)
-            
-            # Format as ISO string with 'Z' to indicate UTC for API
-            fetch_date = provided_date_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
-            logger.info(f"Parsed date {args.date} (UTC+1) as UTC: {fetch_date}")
-        except Exception as e:
-            logger.error(f"Failed to parse date '{args.date}': {e}", exc_info=True)
-            logger.error("Please provide date in ISO format (e.g., 2025-12-10T12:00:00)")
-            sys.exit(1)
+    if args.date_cursor is not None:
+        # Calculate date based on cursor offset
+        current_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        target_date = current_date + timedelta(days=args.date_cursor)
+        fetch_date = target_date.strftime('%Y-%m-%dT%H:%M:%SZ')
+        days_ago = abs(args.date_cursor) if args.date_cursor < 0 else 0
+        if args.date_cursor < 0:
+            logger.info(f"Using date cursor {args.date_cursor} ({days_ago} day{'s' if days_ago != 1 else ''} ago): {fetch_date}")
+        elif args.date_cursor > 0:
+            logger.info(f"Using date cursor {args.date_cursor} ({args.date_cursor} day{'s' if args.date_cursor != 1 else ''} in future): {fetch_date}")
+        else:
+            logger.info(f"Using date cursor 0 (today): {fetch_date}")
     else:
         # Use current date at midnight UTC
         fetch_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%dT%H:%M:%SZ')
-        logger.info(f"No date provided, using current date: {fetch_date}")
+        logger.info(f"No date cursor provided, using current date: {fetch_date}")
     
     # Fetch alerts
     try:
