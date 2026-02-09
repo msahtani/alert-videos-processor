@@ -20,6 +20,118 @@ from tqdm import tqdm
 from pathlib import Path
 
 
+def get_status_file_path():
+    """Get the path to the status file in $HOME"""
+    home_dir = os.path.expanduser("~")
+    return Path(home_dir) / "alert-processor-status.txt"
+
+
+def read_status_file():
+    """Read status file and return status, total_count, processed_count"""
+    status_file = get_status_file_path()
+    if not status_file.exists():
+        return None, None, None
+    
+    try:
+        with open(status_file, 'r', encoding='utf-8') as f:
+            lines = [line.strip() for line in f.readlines()]
+        
+        status = lines[0] if len(lines) > 0 else None
+        total_count = int(lines[1]) if len(lines) > 1 and lines[1].isdigit() else None
+        processed_count = int(lines[2]) if len(lines) > 2 and lines[2].isdigit() else None
+        
+        return status, total_count, processed_count
+    except Exception as e:
+        # Use basic logging if logger not yet initialized
+        try:
+            logger = get_logger(__name__)
+            logger.warning(f"Failed to read status file: {e}", exc_info=True)
+        except:
+            print(f"Warning: Failed to read status file: {e}")
+        return None, None, None
+
+
+def write_status_file(status, total_count=None, processed_count=None):
+    """Write status file with status, total_count, and processed_count"""
+    status_file = get_status_file_path()
+    try:
+        with open(status_file, 'w', encoding='utf-8') as f:
+            f.write(f"{status}\n")
+            if total_count is not None:
+                f.write(f"{total_count}\n")
+            if processed_count is not None:
+                f.write(f"{processed_count}\n")
+    except Exception as e:
+        # Use basic logging if logger not yet initialized
+        try:
+            logger = get_logger(__name__)
+            logger.error(f"Failed to write status file: {e}", exc_info=True)
+        except:
+            print(f"Error: Failed to write status file: {e}")
+
+
+def cleanup_recordings(fetch_date):
+    """Delete recordings matching pattern DDMMYYYY_*.mp4 (e.g., 08022026_221814.mp4)"""
+    try:
+        # Extract date from fetch_date (format: 2026-02-08T00:00:00Z)
+        date_part = fetch_date.split('T')[0]  # Get YYYY-MM-DD part
+        
+        # Parse date and convert to DDMMYYYY format
+        try:
+            date_obj = datetime.strptime(date_part, '%Y-%m-%d')
+            date_pattern = date_obj.strftime('%d%m%Y')  # Convert to DDMMYYYY (e.g., 08022026)
+        except Exception as e:
+            try:
+                logger = get_logger(__name__)
+                logger.error(f"Failed to parse date {date_part}: {e}", exc_info=True)
+            except:
+                pass
+            return
+        
+        # Get recordings directory path
+        recordings_dir = Path(os.path.expanduser("~")) / "recordings"
+        
+        if not recordings_dir.exists():
+            try:
+                logger = get_logger(__name__)
+                logger.debug(f"Recordings directory does not exist: {recordings_dir}")
+            except:
+                pass
+            return
+        
+        # Find all files matching pattern DDMMYYYY_*.mp4
+        pattern = f"{date_pattern}_*.mp4"
+        matching_files = list(recordings_dir.glob(pattern))
+        
+        if not matching_files:
+            try:
+                logger = get_logger(__name__)
+                logger.debug(f"No recordings found matching pattern: {pattern}")
+            except:
+                pass
+            return
+        
+        # Delete matching files
+        deleted_count = 0
+        logger = get_logger(__name__)
+        for file_path in matching_files:
+            try:
+                file_path.unlink()
+                deleted_count += 1
+                logger.debug(f"Deleted recording file: {file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to delete recording file {file_path}: {e}", exc_info=True)
+        
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} recording file(s) matching pattern: {pattern}")
+    except Exception as e:
+        try:
+            logger = get_logger(__name__)
+            logger.error(f"Failed to cleanup recordings: {e}", exc_info=True)
+        except:
+            print(f"Error: Failed to cleanup recordings: {e}")
+
+
 class LoggingTqdm(tqdm):
     """Custom tqdm that logs progress updates to resume log file"""
     
@@ -559,6 +671,12 @@ def main():
             logger.info(f"Using date cursor {args.date_cursor} ({args.date_cursor} day{'s' if args.date_cursor != 1 else ''} in future): {fetch_date}")
         else:
             logger.info(f"Using date cursor 0 (today): {fetch_date}")
+        
+        # Check status file - only process if status is EMPTY
+        status, _, _ = read_status_file()
+        if status and status != "EMPTY":
+            logger.info(f"Status file shows '{status}', skipping processing (only process when status is EMPTY)")
+            sys.exit(0)
     else:
         # Use current date at midnight UTC
         fetch_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -574,7 +692,13 @@ def main():
     
     if not alerts:
         logger.info(f"No alerts found for date {fetch_date}")
+        write_status_file("EMPTY")
         sys.exit(0)
+    
+    # Write PROCESSING status with total alerts count
+    total_alerts = len(alerts)
+    write_status_file("PROCESSING", total_count=total_alerts, processed_count=0)
+    logger.info(f"Status file updated: PROCESSING with {total_alerts} total alerts")
     
     # Sort alerts by alertDate (oldest first)
     def get_alert_datetime(alert):
@@ -628,6 +752,10 @@ def main():
                 pbar.set_postfix({"✓": successful, "✗": failed})
                 logger.error(f"Alert {alert_id} processing failed", extra={"alert_id": alert_id})
             
+            # Update status file with processed count
+            processed_count = successful + failed
+            write_status_file("PROCESSING", total_count=total_alerts, processed_count=processed_count)
+            
             pbar.update(1)
     
     # Send batch email with all processed alerts if email sender is configured
@@ -637,6 +765,14 @@ def main():
             with PerformanceLogger(logger, "send_batch_email", alert_count=len(processed_alerts)):
                 email_sender.send_batch_alert_email(processed_alerts)
             pbar.update(1)
+    
+    # Write FINISHED status
+    processed_count = successful + failed
+    write_status_file("FINISHED", total_count=total_alerts, processed_count=processed_count)
+    logger.info(f"Status file updated: FINISHED with {total_alerts} total alerts, {processed_count} processed")
+    
+    # Cleanup recordings for the processed date
+    cleanup_recordings(fetch_date)
     
     # Final summary
     print(f"\n✓ Completed: {successful} | ✗ Failed: {failed} | Total: {len(alerts)}")
