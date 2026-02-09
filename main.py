@@ -695,10 +695,13 @@ def main():
         write_status_file("EMPTY")
         sys.exit(0)
     
-    # Write PROCESSING status with total alerts count
+    # Determine status string based on date_cursor
+    processing_status = "MF_PROCESSING" if args.date_cursor is not None else "PROCESSING"
+    
+    # Write PROCESSING/MF_PROCESSING status with total alerts count
     total_alerts = len(alerts)
-    write_status_file("PROCESSING", total_count=total_alerts, processed_count=0)
-    logger.info(f"Status file updated: PROCESSING with {total_alerts} total alerts")
+    write_status_file(processing_status, total_count=total_alerts, processed_count=0)
+    logger.info(f"Status file updated: {processing_status} with {total_alerts} total alerts")
     
     # Sort alerts by alertDate (oldest first)
     def get_alert_datetime(alert):
@@ -753,7 +756,7 @@ def main():
                 logger.error(f"Alert {alert_id} processing failed", extra={"alert_id": alert_id})
             
             # Update status file with successful count (line 3)
-            write_status_file("PROCESSING", total_count=total_alerts, processed_count=successful)
+            write_status_file(processing_status, total_count=total_alerts, processed_count=successful)
             
             pbar.update(1)
     
