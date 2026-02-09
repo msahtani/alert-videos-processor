@@ -752,9 +752,8 @@ def main():
                 pbar.set_postfix({"✓": successful, "✗": failed})
                 logger.error(f"Alert {alert_id} processing failed", extra={"alert_id": alert_id})
             
-            # Update status file with processed count
-            processed_count = successful + failed
-            write_status_file("PROCESSING", total_count=total_alerts, processed_count=processed_count)
+            # Update status file with successful count (line 3)
+            write_status_file("PROCESSING", total_count=total_alerts, processed_count=successful)
             
             pbar.update(1)
     
@@ -767,9 +766,8 @@ def main():
             pbar.update(1)
     
     # Write FINISHED status
-    processed_count = successful + failed
-    write_status_file("FINISHED", total_count=total_alerts, processed_count=processed_count)
-    logger.info(f"Status file updated: FINISHED with {total_alerts} total alerts, {processed_count} processed")
+    write_status_file("FINISHED", total_count=total_alerts, processed_count=successful)
+    logger.info(f"Status file updated: FINISHED with {total_alerts} total alerts, {successful} successfully processed")
     
     # Cleanup recordings for the processed date
     cleanup_recordings(fetch_date)
