@@ -1,8 +1,7 @@
 """
-Clip Extractor for S3 Video Chunks
-Extracts video clips from S3-stored MP4 chunks for a given alert time
+Clip Extractor for Local Video Chunks
+Extracts video clips from local MP4 chunks for a given alert time
 """
-import boto3
 import datetime
 import subprocess
 import os
@@ -10,34 +9,29 @@ import logging
 import re
 from typing import Optional, List, Dict, Tuple
 from pathlib import Path
-from botocore.config import Config
 from video_utils import ensure_browser_playable_mp4
 
 
 class ClipExtractor:
-    """Extracts video clips from S3-stored or local video chunks"""
+    """Extracts video clips from local video chunks"""
     
-    def __init__(self, region: str, s3_bucket: str, s3_prefix: str, 
-                 before_minutes: int, after_minutes: int, output_dir: str,
+    def __init__(self, before_minutes: int, after_minutes: int, output_dir: str,
                  chunk_duration_seconds: int = 300, chunk_filename_pattern: str = None,
                  local_source_dir: str = None):
         """
         Initialize clip extractor
         
         Args:
-            region: AWS region
-            s3_bucket: S3 bucket name containing video chunks
-            s3_prefix: S3 key prefix for video chunks (e.g., alerts/)
             before_minutes: Minutes before alert time to include
             after_minutes: Minutes after alert time to include
             output_dir: Directory to save temporary clip files
             chunk_duration_seconds: Duration of each chunk in seconds (default: 300 = 5 minutes)
             chunk_filename_pattern: Regex pattern for chunk filenames (default: gcam_DDMMYYYY_HHMMSS.mp4)
-            local_source_dir: Local directory containing video chunks (if provided, S3 is not used)
+            local_source_dir: Local directory containing video chunks (required)
         """
-        self.region = region
-        self.s3_bucket = s3_bucket
-        self.s3_prefix = s3_prefix.rstrip('/') + '/' if s3_prefix else ''
+        if not local_source_dir:
+            raise ValueError("local_source_dir is required")
+        
         self.before_minutes = before_minutes
         self.after_minutes = after_minutes
         self.output_dir = output_dir
@@ -53,43 +47,8 @@ class ClipExtractor:
         # Create output directory if it doesn't exist
         os.makedirs(self.output_dir, exist_ok=True)
         
-        # Only initialize S3 client if not using local source
-        self.s3_client = None
-        if not self.local_source_dir:
-            # Configure boto3 with retries and timeouts for better reliability
-            config = Config(
-                retries={
-                    'max_attempts': 3,
-                    'mode': 'adaptive'
-                },
-                read_timeout=300,  # 5 minutes
-                connect_timeout=60  # 1 minute
-            )
-            
-            # Create boto3 S3 client (credentials from environment variables)
-            self.client_kwargs = {"region_name": self.region, "config": config}
-            self.s3_client = boto3.client("s3", **self.client_kwargs)
-        else:
-            logging.info(f"Using local source directory: {self.local_source_dir}")
+        logging.info(f"Using local source directory: {self.local_source_dir}")
     
-    def _check_credentials(self):
-        """Check if AWS credentials are available (skipped when using local source)"""
-        # Skip credential check if using local source directory
-        if self.local_source_dir:
-            return True
-            
-        try:
-            # Try to create a session to validate credentials
-            session = boto3.Session()
-            credentials = session.get_credentials()
-            if credentials is None:
-                logging.error("AWS credentials not found!")
-                logging.error("Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables")
-                return False
-            return True
-        except Exception as e:
-            logging.error(f"Failed to validate AWS credentials: {e}")
-            return False
     
     def _parse_chunk_start_time(self, filename: str) -> Optional[datetime.datetime]:
         """
@@ -111,50 +70,12 @@ class ClipExtractor:
     
     def _list_chunks(self) -> List[Dict]:
         """
-        List all video chunks from local directory or S3
+        List all video chunks from local directory
         
         Returns:
-            List of chunk dictionaries with keys: key/path, name, S (start time), E (end time)
+            List of chunk dictionaries with keys: path, name, S (start time), E (end time)
         """
-        chunks = []
-        
-        # Use local source directory if configured
-        if self.local_source_dir:
-            return self._list_local_chunks()
-        
-        # Otherwise, list from S3
-        paginator = self.s3_client.get_paginator('list_objects_v2')
-        
-        try:
-            for page in paginator.paginate(Bucket=self.s3_bucket, Prefix=self.s3_prefix):
-                for obj in page.get("Contents", []):
-                    key = obj["Key"]
-                    filename = os.path.basename(key)
-                    
-                    # Parse start time from filename
-                    start_time = self._parse_chunk_start_time(filename)
-                    if not start_time:
-                        continue
-                    
-                    # Calculate end time (chunk duration after start time)
-                    end_time = start_time + datetime.timedelta(seconds=self.chunk_duration_seconds)
-                    
-                    chunks.append({
-                        "key": key,
-                        "name": filename,
-                        "S": start_time,
-                        "E": end_time
-                    })
-            
-            # Sort chunks by start time
-            chunks.sort(key=lambda x: x["S"])
-            logging.debug(f"Found {len(chunks)} video chunks in S3")
-            return chunks
-            
-        except Exception as e:
-            logging.error(f"Failed to list chunks from S3: {e}")
-            logging.exception("Full traceback:")
-            return []
+        return self._list_local_chunks()
     
     def _list_local_chunks(self) -> List[Dict]:
         """
@@ -288,10 +209,6 @@ class ClipExtractor:
         Returns:
             Tuple of (video_file_path, thumbnail_file_path), or (None, None) if extraction failed
         """
-        # Check credentials before proceeding
-        if not self._check_credentials():
-            return None, None
-        
         logging.info(f"Starting clip extraction for alert time: {alert_time_iso}")
         
         # Parse alert time (strip timezone info if present)
@@ -316,10 +233,10 @@ class ClipExtractor:
         
         logging.info(f"Clip time window: {window_start} to {window_end} (before: {self.before_minutes}min, after: {self.after_minutes}min)")
         
-        # List all chunks from S3
+        # List all chunks from local directory
         all_chunks = self._list_chunks()
         if not all_chunks:
-            logging.error("No chunks found in S3 or failed to list chunks")
+            logging.error("No chunks found in local directory or failed to list chunks")
             return None, None
         
         # Find chunks that intersect with the time window
@@ -342,24 +259,9 @@ class ClipExtractor:
                 part_mp4 = os.path.join(self.output_dir, f"part_{idx}.mp4")
                 temp_files_to_cleanup.append(part_mp4)
                 
-                # Determine source file path (local or download from S3)
-                if self.local_source_dir:
-                    # Use local file directly
-                    local_mp4 = chunk["path"]
-                    logging.debug(f"Using local file: {local_mp4}")
-                else:
-                    # Download chunk from S3
-                    local_mp4 = os.path.join(self.output_dir, chunk["name"])
-                    temp_files_to_cleanup.append(local_mp4)
-                    
-                    logging.debug(f"Downloading {chunk['key']} from S3...")
-                    try:
-                        self.s3_client.download_file(self.s3_bucket, chunk["key"], local_mp4)
-                        logging.debug(f"Downloaded chunk to {local_mp4}")
-                    except Exception as e:
-                        logging.error(f"Failed to download chunk {chunk['key']}: {e}")
-                        self._cleanup_temp_files(temp_files_to_cleanup)
-                        return None, None
+                # Use local file directly
+                local_mp4 = chunk["path"]
+                logging.debug(f"Using local file: {local_mp4}")
                 
                 # Calculate intersection of chunk time range with window
                 chunk_start = max(chunk["S"], window_start)

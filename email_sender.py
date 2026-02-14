@@ -1,6 +1,7 @@
 """
 Email sender module for sending alert notifications with video URLs
 """
+import os
 import smtplib
 import logging
 from email.mime.text import MIMEText
@@ -12,28 +13,27 @@ from datetime import datetime
 class EmailSender:
     """Handles sending email notifications for alerts"""
     
-    def __init__(self, smtp_server: str, smtp_port: int, smtp_username: str, 
-                 smtp_password: str, from_email: str, to_emails: List[str], 
-                 use_tls: bool = True):
+    def __init__(self, from_email: str, to_emails: List[str], use_tls: bool = True):
         """
         Initialize email sender
         
         Args:
-            smtp_server: SMTP server address (e.g., smtp.gmail.com)
-            smtp_port: SMTP server port (e.g., 587 for TLS, 465 for SSL)
-            smtp_username: SMTP username/email for authentication
-            smtp_password: SMTP password or app-specific password
             from_email: Email address to send from
             to_emails: List of recipient email addresses
             use_tls: Whether to use TLS encryption (default: True)
         """
-        self.smtp_server = smtp_server
-        self.smtp_port = smtp_port
-        self.smtp_username = smtp_username
-        self.smtp_password = smtp_password
+        # Get SMTP settings from environment variables
+        self.smtp_server = os.environ.get("SMTP_SERVER", "").strip()
+        smtp_port_str = os.environ.get("SMTP_PORT", "587").strip()
+        self.smtp_port = int(smtp_port_str) if smtp_port_str else 587
+        self.smtp_username = os.environ.get("SMTP_USERNAME", "").strip()
+        self.smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
+        
         self.from_email = from_email
         self.to_emails = to_emails if isinstance(to_emails, list) else [to_emails]
         self.use_tls = use_tls
+        
+        logging.info(f"Email notifications enabled. Sending to: {', '.join(self.to_emails)}")
     
     def _create_email_body(self, alert: Dict, video_url: str) -> str:
         """
