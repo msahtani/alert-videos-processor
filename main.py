@@ -50,9 +50,9 @@ def get_fetch_date(date_cursor: Optional[int]) -> str:
     if date_cursor is not None:
         current_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         target_date = current_date + timedelta(days=date_cursor)
-        return target_date.strftime('%Y-%m-%dT%H:%M:%SZ')
+        return target_date.strftime('%Y-%m-%d')
     else:
-        return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%dT%H:%M:%SZ')
+        return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).strftime('%Y-%m-%d')
 
 
 def initialize_email_sender(config, logger):

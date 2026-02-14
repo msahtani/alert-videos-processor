@@ -10,8 +10,8 @@ from logger_config import get_logger
 def cleanup_recordings(fetch_date):
     """Delete recordings matching pattern DDMMYYYY_*.mp4 (e.g., 08022026_221814.mp4)"""
     try:
-        # Extract date from fetch_date (format: 2026-02-08T00:00:00Z)
-        date_part = fetch_date.split('T')[0]  # Get YYYY-MM-DD part
+        # Extract date from fetch_date (format: 2026-02-08 or 2026-02-08T00:00:00Z)
+        date_part = fetch_date.split('T')[0] if 'T' in fetch_date else fetch_date  # Get YYYY-MM-DD part
         
         # Parse date and convert to DDMMYYYY format
         try:
