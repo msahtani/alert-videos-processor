@@ -4,6 +4,7 @@ Status file management for tracking processing state and MQTT publishing
 import os
 import json
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -69,11 +70,8 @@ def _publish_mqtt_status(board_id: str, status: str, total_count: Optional[int] 
     mqtt_topic = os.environ.get("MQTT_TOPIC", f"storeyes/{board_id}/alert-processor")
     qos = os.environ.get("QOS", "1")
     retain = os.environ.get("RETAIN", "false").lower() == "true"
-
-    # Hardcoded timing / retry behaviour so it is stable on low-power devices (e.g. Pi Zero)
-    # instead of relying on environment variables.
-    timeout = 10  # seconds to give the network loop to send the message
-    retries = 1   # single attempt; failures will still be logged if connect/publish raises
+    timeout = int(os.environ.get("TIMEOUT", "5"))
+    retries = int(os.environ.get("RETRIES", "3"))
     
     # Build JSON payload (same format as alert-monitor.sh)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -157,19 +155,22 @@ def _publish_mqtt_status(board_id: str, status: str, total_count: Optional[int] 
                 f"MQTT publish invoked, mid={result.mid}, rc={result.rc}"
             )
 
-            # On very small devices (Pi Zero) wait_for_publish() can report a timeout
-            # even though the broker has already ACKed (we see PUBACK + on_publish=Success
-            # in the logs). To avoid false failures, we give the network loop a bit of
-            # time to flush the message and then treat the publish as successful unless
-            # an exception was raised.
-            time.sleep(timeout)
-
-            client.loop_stop()
-            client.disconnect()
-            logger.debug(
-                f"MQTT status published (fire-and-forget semantics, attempt {attempt}/{retries})"
-            )
-            return True
+            # Wait for message to be published (with timeout)
+            if result.wait_for_publish(timeout=timeout):
+                # Stop network loop
+                client.loop_stop()
+                client.disconnect()
+                logger.debug(
+                    f"MQTT status published successfully (attempt {attempt}/{retries})"
+                )
+                return True
+            else:
+                logger.warning(
+                    f"MQTT publish timeout (attempt {attempt}/{retries}), "
+                    f"mid={result.mid}, rc={result.rc}"
+                )
+                client.loop_stop()
+                client.disconnect()
 
         except Exception as e:
             # Log full stack trace so that with --verbose you can see exactly why publish failed
@@ -177,6 +178,13 @@ def _publish_mqtt_status(board_id: str, status: str, total_count: Optional[int] 
                 f"MQTT publish error (attempt {attempt}/{retries}): {e}",
                 exc_info=True,
             )
+            # Also print traceback directly to stdout so it is visible even if logs go to a file
+            try:
+                print(f"MQTT publish error (attempt {attempt}/{retries}): {e}")
+                traceback.print_exc()
+            except Exception:
+                # Never let debug printing break the main flow
+                pass
             if client:
                 try:
                     client.loop_stop()
@@ -229,5 +237,11 @@ def write_status_file(status, total_count=None, processed_count=None, board_id: 
         _publish_mqtt_status(board_id, status, total_count, processed_count)
     except Exception as e:
         logger.warning(f"Failed to publish MQTT status: {e}", exc_info=True)
+        # Also print traceback to stdout to make debugging easier on constrained devices
+        try:
+            print(f"Failed to publish MQTT status: {e}")
+            traceback.print_exc()
+        except Exception:
+            pass
         # Don't fail the whole operation if MQTT fails
 
