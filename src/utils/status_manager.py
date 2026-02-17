@@ -71,13 +71,6 @@ def _publish_mqtt_status(board_id: str, status: str, total_count: Optional[int] 
     retain = os.environ.get("RETAIN", "false").lower() == "true"
     timeout = int(os.environ.get("TIMEOUT", "5"))
     retries = int(os.environ.get("RETRIES", "3"))
-
-    # Log MQTT configuration being used for publishing (without password)
-    logger.info(
-        f"MQTT publish config: host={mqtt_host}, port={mqtt_port}, "
-        f"user={mqtt_user}, topic={mqtt_topic}, qos={qos}, "
-        f"timeout={timeout}, retries={retries}"
-    )
     
     # Build JSON payload (same format as alert-monitor.sh)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -102,48 +95,54 @@ def _publish_mqtt_status(board_id: str, status: str, total_count: Optional[int] 
     # Convert QOS to int
     qos_int = int(qos)
 
-    # MQTT callbacks for deeper debugging
+    # Callback API v2 callbacks for detailed logging and compatibility with paho-mqtt >= 2.0
     def on_connect(client, userdata, flags, reason_code, properties=None):
-        logger.info(
-            f"MQTT connect result: reason_code={reason_code}, flags={flags}",
-        )
+        logger.info(f"MQTT connect result: reason_code={reason_code}, flags={flags}")
 
     def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
         logger.warning(
             f"MQTT disconnect: reason_code={reason_code}, flags={disconnect_flags}"
         )
 
-    def on_publish(client, userdata, mid):
-        logger.debug(f"MQTT on_publish called, mid={mid}")
+    def on_publish(client, userdata, mid, reason_code, properties=None):
+        logger.debug(
+            f"MQTT on_publish: mid={mid}, reason_code={reason_code}, properties={properties}"
+        )
 
     def on_log(client, userdata, level, buf):
-        # Only log in debug level to avoid noise
+        # Mirror the debug logs you see in the Linux runtime
         logger.debug(f"MQTT log [{level}]: {buf}")
-    
+
     # Retry loop (same as alert-monitor.sh)
     client = None
     for attempt in range(1, retries + 1):
         try:
+            logger.info(
+                f"MQTT publish config: host={mqtt_host}, port={mqtt_port}, "
+                f"user={mqtt_user}, topic={mqtt_topic}, qos={qos_int}, "
+                f"timeout={timeout}, retries={retries}"
+            )
+            logger.debug(
+                f"Connecting to MQTT broker {mqtt_host}:{mqtt_port} (attempt {attempt}/{retries})"
+            )
+
             # Create MQTT client (use latest callback API version to avoid deprecation warning)
             client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
             client.username_pw_set(mqtt_user, mqtt_pass)
-
-            # Attach debug callbacks
             client.on_connect = on_connect
             client.on_disconnect = on_disconnect
             client.on_publish = on_publish
             client.on_log = on_log
-            
+
             # Connect to broker
-            logger.debug(f"Connecting to MQTT broker {mqtt_host}:{mqtt_port} (attempt {attempt}/{retries})")
             client.connect(mqtt_host, int(mqtt_port), keepalive=60)
-            
+
             # Start network loop to handle connection
             client.loop_start()
-            
+
             # Wait a bit for connection to establish
             time.sleep(0.1)
-            
+
             # Publish message
             result = client.publish(
                 mqtt_topic,
@@ -151,14 +150,18 @@ def _publish_mqtt_status(board_id: str, status: str, total_count: Optional[int] 
                 qos=qos_int,
                 retain=retain
             )
-            logger.debug(f"MQTT publish invoked, mid={result.mid}, rc={result.rc}")
-            
+            logger.debug(
+                f"MQTT publish invoked, mid={result.mid}, rc={result.rc}"
+            )
+
             # Wait for message to be published (with timeout)
             if result.wait_for_publish(timeout=timeout):
                 # Stop network loop
                 client.loop_stop()
                 client.disconnect()
-                logger.debug(f"MQTT status published successfully (attempt {attempt}/{retries})")
+                logger.debug(
+                    f"MQTT status published successfully (attempt {attempt}/{retries})"
+                )
                 return True
             else:
                 logger.warning(
@@ -167,16 +170,16 @@ def _publish_mqtt_status(board_id: str, status: str, total_count: Optional[int] 
                 )
                 client.loop_stop()
                 client.disconnect()
-                
+
         except Exception as e:
             logger.warning(f"MQTT publish error (attempt {attempt}/{retries}): {e}")
             if client:
                 try:
                     client.loop_stop()
                     client.disconnect()
-                except:
+                except Exception:
                     pass
-        
+
         if attempt < retries:
             time.sleep(2)
     

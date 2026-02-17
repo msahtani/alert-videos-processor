@@ -102,11 +102,6 @@ def wait_for_broker_message(device_id: str, default_date: str, logger) -> Tuple[
     mqtt_pass = os.environ.get("MQTT_PASS", "12345")
     mqtt_topic = f"storeyes/{device_id}/alert-processing"
     
-    # Log MQTT configuration being used for waiting/subscribing
-    logger.info(
-        f"MQTT wait config: host={mqtt_host}, port={mqtt_port}, "
-        f"user={mqtt_user}, topic={mqtt_topic}"
-    )
     logger.info(f"Waiting for message on topic: {mqtt_topic}")
     
     # Variables to store the received message
