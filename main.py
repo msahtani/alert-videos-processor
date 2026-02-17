@@ -109,15 +109,15 @@ def wait_for_broker_message(device_id: str, default_date: str, logger) -> Tuple[
     message_received = threading.Event()
     connection_error = None
     
-    def on_connect(client, userdata, flags, rc):
+    def on_connect(client, userdata, flags, reason_code, properties=None):
         """Callback for when the client receives a CONNACK response from the server"""
-        if rc == 0:
+        if reason_code == 0:
             logger.info(f"Connected to MQTT broker at {mqtt_host}:{mqtt_port}")
             # Subscribe to the topic
             client.subscribe(mqtt_topic, qos=1)
             logger.info(f"Subscribed to topic: {mqtt_topic}")
         else:
-            error_msg = f"Failed to connect to MQTT broker, return code {rc}"
+            error_msg = f"Failed to connect to MQTT broker, return code {reason_code}"
             logger.error(error_msg)
             nonlocal connection_error
             connection_error = error_msg
@@ -154,14 +154,14 @@ def wait_for_broker_message(device_id: str, default_date: str, logger) -> Tuple[
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
     
-    def on_disconnect(client, userdata, rc):
+    def on_disconnect(client, userdata, rc, properties=None):
         """Callback for when the client disconnects from the server"""
         if rc != 0:
             logger.warning(f"Unexpected MQTT disconnection (rc={rc})")
     
     try:
-        # Create MQTT client
-        client = mqtt.Client()
+        # Create MQTT client (use latest callback API version to avoid deprecation warning)
+        client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
         client.username_pw_set(mqtt_user, mqtt_pass)
         client.on_connect = on_connect
         client.on_message = on_message
@@ -182,7 +182,7 @@ def wait_for_broker_message(device_id: str, default_date: str, logger) -> Tuple[
             
             if connection_error:
                 logger.error(f"Connection error: {connection_error}")
-                return None, None
+                return None, None, False
             
             if received_message:
                 action = received_message["action"]

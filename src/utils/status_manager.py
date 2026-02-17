@@ -99,8 +99,8 @@ def _publish_mqtt_status(board_id: str, status: str, total_count: Optional[int] 
     client = None
     for attempt in range(1, retries + 1):
         try:
-            # Create MQTT client
-            client = mqtt.Client()
+            # Create MQTT client (use latest callback API version to avoid deprecation warning)
+            client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
             client.username_pw_set(mqtt_user, mqtt_pass)
             
             # Connect to broker
