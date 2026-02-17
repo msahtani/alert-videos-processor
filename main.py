@@ -6,24 +6,29 @@ import logging
 import os
 import sys
 import uuid
+import json
+import threading
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
-from api_client import APIClient
-from clip_extractor import ClipExtractor
-from s3_uploader import S3Uploader
-from email_sender import EmailSender
-from logger_config import setup_logging, get_logger, PerformanceLogger
+import paho.mqtt.client as mqtt
 
-from device_utils import get_device_id
-from status_manager import read_status_file, write_status_file
-from aws_utils import setup_aws_credentials, check_aws_credentials
-from config_manager import load_config, parse_config
-from progress_utils import LoggingTqdm
-from cleanup_utils import cleanup_recordings
-from alert_processor import process_alert
-from test_connectivity import run_connectivity_tests
+from src.core.api_client import APIClient
+from src.core.clip_extractor import ClipExtractor
+from src.core.s3_uploader import S3Uploader
+from src.core.email_sender import EmailSender
+from src.utils.logger_config import setup_logging, get_logger, PerformanceLogger
+
+from src.utils.device_utils import get_device_id
+from src.utils.status_manager import read_status_file, write_status_file
+from src.utils.aws_utils import setup_aws_credentials, check_aws_credentials
+from src.utils.config_manager import load_config, parse_config
+from src.utils.progress_utils import LoggingTqdm
+from src.utils.cleanup_utils import cleanup_recordings
+from src.core.alert_processor import process_alert
+from src.tests.test_connectivity import run_connectivity_tests
 
 
 def setup_resume_logger(log_dir: str) -> logging.Logger:
@@ -74,6 +79,131 @@ def initialize_email_sender(config, logger):
         return None
 
 
+def wait_for_broker_message(device_id: str, default_date: str, logger) -> Tuple[Optional[str], Optional[str], bool]:
+    """
+    Wait for a message from the broker on topic "storeyes/<device-id>/alert-processing"
+    
+    Args:
+        device_id: Device ID for the topic
+        default_date: Default date to use if not provided in message
+        logger: Logger instance
+        
+    Returns:
+        Tuple of (action: Optional[str], date: Optional[str], date_provided: bool)
+        Returns (None, None, False) if connection fails or invalid message
+        Returns ("abort", None, False) if action is abort
+        Returns ("start", date, date_provided) if action is start
+        date_provided indicates if date was explicitly provided in the message
+    """
+    # MQTT configuration
+    mqtt_host = os.environ.get("MQTT_HOST", "18.100.207.236")
+    mqtt_port = int(os.environ.get("MQTT_PORT", "1883"))
+    mqtt_user = os.environ.get("MQTT_USER", "storeyes")
+    mqtt_pass = os.environ.get("MQTT_PASS", "12345")
+    mqtt_topic = f"storeyes/{device_id}/alert-processing"
+    
+    logger.info(f"Waiting for message on topic: {mqtt_topic}")
+    
+    # Variables to store the received message
+    received_message = None
+    message_received = threading.Event()
+    connection_error = None
+    
+    def on_connect(client, userdata, flags, rc):
+        """Callback for when the client receives a CONNACK response from the server"""
+        if rc == 0:
+            logger.info(f"Connected to MQTT broker at {mqtt_host}:{mqtt_port}")
+            # Subscribe to the topic
+            client.subscribe(mqtt_topic, qos=1)
+            logger.info(f"Subscribed to topic: {mqtt_topic}")
+        else:
+            error_msg = f"Failed to connect to MQTT broker, return code {rc}"
+            logger.error(error_msg)
+            nonlocal connection_error
+            connection_error = error_msg
+            message_received.set()
+    
+    def on_message(client, userdata, msg):
+        """Callback for when a PUBLISH message is received from the server"""
+        try:
+            payload_str = msg.payload.decode('utf-8')
+            logger.info(f"Received message on topic {msg.topic}: {payload_str}")
+            
+            # Parse JSON payload
+            payload = json.loads(payload_str)
+            
+            # Extract action and date
+            action = payload.get("action")
+            date = payload.get("date")
+            date_provided = date is not None and date != ""
+            
+            if action not in ["start", "abort"]:
+                logger.warning(f"Invalid action '{action}' in message. Expected 'start' or 'abort'")
+                return
+            
+            nonlocal received_message
+            received_message = {
+                "action": action,
+                "date": date if date_provided else default_date,
+                "date_provided": date_provided
+            }
+            message_received.set()
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON message: {e}")
+        except Exception as e:
+            logger.error(f"Error processing message: {e}", exc_info=True)
+    
+    def on_disconnect(client, userdata, rc):
+        """Callback for when the client disconnects from the server"""
+        if rc != 0:
+            logger.warning(f"Unexpected MQTT disconnection (rc={rc})")
+    
+    try:
+        # Create MQTT client
+        client = mqtt.Client()
+        client.username_pw_set(mqtt_user, mqtt_pass)
+        client.on_connect = on_connect
+        client.on_message = on_message
+        client.on_disconnect = on_disconnect
+        
+        # Connect to broker
+        logger.info(f"Connecting to MQTT broker at {mqtt_host}:{mqtt_port}...")
+        client.connect(mqtt_host, mqtt_port, keepalive=60)
+        
+        # Start network loop
+        client.loop_start()
+        
+        # Wait for message (with timeout of 1 hour)
+        timeout_seconds = 3600
+        if message_received.wait(timeout=timeout_seconds):
+            client.loop_stop()
+            client.disconnect()
+            
+            if connection_error:
+                logger.error(f"Connection error: {connection_error}")
+                return None, None
+            
+            if received_message:
+                action = received_message["action"]
+                date = received_message["date"]
+                date_provided = received_message.get("date_provided", False)
+                logger.info(f"Received action: {action}, date: {date}, date_provided: {date_provided}")
+                return action, date, date_provided
+            else:
+                logger.warning("Message received but payload was invalid")
+                return None, None, False
+        else:
+            logger.error(f"Timeout waiting for message after {timeout_seconds} seconds")
+            client.loop_stop()
+            client.disconnect()
+            return None, None, False
+            
+    except Exception as e:
+        logger.error(f"Error waiting for broker message: {e}", exc_info=True)
+        return None, None, False
+
+
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description="Process alerts and extract video clips")
@@ -91,15 +221,30 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default="config.conf",
-        help="Path to config file (default: config.conf)"
+        default="config/config.conf",
+        help="Path to config file (default: config/config.conf)"
     )
     parser.add_argument(
         "--test",
         action="store_true",
         help="Test API and S3 connectivity and exit"
     )
+    parser.add_argument(
+        "--fallback",
+        action="store_true",
+        help="Fallback mode: use yesterday's date (-1) and check status file before processing"
+    )
+    parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="Wait for a message from the broker on topic 'storeyes/<device-id>/alert-processing' before processing"
+    )
     args = parser.parse_args()
+    
+    # If --fallback is specified and date-cursor is not provided, set it to -1
+    if args.fallback and args.date_cursor is None:
+        args.date_cursor = -1
+        # Note: Status file check will happen later when date_cursor is not None
     
     # Setup logging
     log_level = os.environ.get("LOG_LEVEL", "INFO")
@@ -166,8 +311,32 @@ def main():
         logger.error("AWS credentials are required for uploading processed clips to S3")
         sys.exit(1)
     
-    # Replace {device-id} in the prefix
-    s3_upload_prefix = config["s3_upload_prefix_template"].replace("{device-id}", device_id)
+    # Determine date to fetch alerts for (needed for S3 prefix)
+    fetch_date = get_fetch_date(args.date_cursor)
+    
+    # If --wait flag is set, wait for broker message
+    if args.wait:
+        logger.info("--wait flag enabled, waiting for broker message...")
+        action, broker_date, date_provided = wait_for_broker_message(device_id, fetch_date, logger)
+        
+        if action is None:
+            logger.error("Failed to receive valid message from broker")
+            sys.exit(1)
+        
+        if action == "abort":
+            logger.info("Received 'abort' action from broker, exiting")
+            sys.exit(0)
+        
+        if action == "start":
+            if date_provided:
+                # Use the date from the broker message
+                fetch_date = broker_date
+                logger.info(f"Using date from broker message: {fetch_date}")
+            else:
+                logger.info(f"No date in broker message, using default: {fetch_date}")
+    
+    # Replace {device-id} and {date} in the prefix
+    s3_upload_prefix = config["s3_upload_prefix_template"].replace("{device-id}", device_id).replace("{date}", fetch_date)
     
     # api_client already created above for fetching global settings
     
@@ -201,8 +370,9 @@ def main():
     # Initialize email sender if enabled
     email_sender = initialize_email_sender(config, logger)
     
-    # Determine date to fetch alerts for
-    fetch_date = get_fetch_date(args.date_cursor)
+    # fetch_date already calculated above for S3 prefix
+    if args.fallback:
+        logger.info("Fallback mode enabled: using yesterday's date and checking status file")
     if args.date_cursor is not None:
         days_ago = abs(args.date_cursor) if args.date_cursor < 0 else 0
         if args.date_cursor < 0:
@@ -230,7 +400,7 @@ def main():
     
     if not alerts:
         logger.info(f"No alerts found for date {fetch_date}")
-        write_status_file("EMPTY")
+        write_status_file("EMPTY", board_id=device_id)
         sys.exit(0)
     
     # Determine status string based on date_cursor
@@ -238,7 +408,7 @@ def main():
     
     # Write PROCESSING/MF_PROCESSING status with total alerts count
     total_alerts = len(alerts)
-    write_status_file(processing_status, total_count=total_alerts, processed_count=0)
+    write_status_file(processing_status, total_count=total_alerts, processed_count=0, board_id=device_id)
     logger.info(f"Status file updated: {processing_status} with {total_alerts} total alerts")
     
     # Process each alert with progress bar
@@ -271,7 +441,7 @@ def main():
                 logger.error(f"Alert {alert_id} processing failed", extra={"alert_id": alert_id})
             
             # Update status file with successful count
-            write_status_file(processing_status, total_count=total_alerts, processed_count=successful)
+            write_status_file(processing_status, total_count=total_alerts, processed_count=successful, board_id=device_id)
             
             pbar.update(1)
     
@@ -284,7 +454,7 @@ def main():
             pbar.update(1)
     
     # Write FINISHED status
-    write_status_file("FINISHED", total_count=total_alerts, processed_count=successful)
+    write_status_file("FINISHED", total_count=total_alerts, processed_count=successful, board_id=device_id)
     logger.info(f"Status file updated: FINISHED with {total_alerts} total alerts, {successful} successfully processed")
     
     # Cleanup recordings for the processed date
