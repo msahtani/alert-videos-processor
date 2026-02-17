@@ -154,10 +154,10 @@ def wait_for_broker_message(device_id: str, default_date: str, logger) -> Tuple[
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
     
-    def on_disconnect(client, userdata, rc, properties=None):
-        """Callback for when the client disconnects from the server"""
-        if rc != 0:
-            logger.warning(f"Unexpected MQTT disconnection (rc={rc})")
+    def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
+        """Callback for when the client disconnects from the server (Callback API v2)"""
+        if reason_code != 0:
+            logger.warning(f"Unexpected MQTT disconnection (reason_code={reason_code}, flags={disconnect_flags})")
     
     try:
         # Create MQTT client (use latest callback API version to avoid deprecation warning)
