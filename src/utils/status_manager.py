@@ -154,8 +154,10 @@ def _publish_mqtt_status(board_id: str, status: str, total_count: Optional[int] 
                 f"MQTT publish invoked, mid={result.mid}, rc={result.rc}"
             )
 
-            # Wait for message to be published (with timeout)
-            if result.wait_for_publish(timeout=timeout):
+            # Wait for message to be published, then check publish state explicitly.
+            result.wait_for_publish(timeout=timeout)
+
+            if result.is_published():
                 # Stop network loop
                 client.loop_stop()
                 client.disconnect()
