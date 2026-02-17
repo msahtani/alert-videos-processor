@@ -154,9 +154,13 @@ def setup_logging(
     # Clear existing handlers
     root_logger.handlers.clear()
     
-    # Console handler - only show errors (progress bars will show progress)
+    # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.ERROR)  # Only show errors on console
+    # In verbose mode, show everything (DEBUG and above); otherwise only show errors
+    if verbose:
+        console_handler.setLevel(level)
+    else:
+        console_handler.setLevel(logging.ERROR)
     
     if json_logging:
         console_formatter = JSONFormatter()

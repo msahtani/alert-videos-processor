@@ -172,7 +172,11 @@ def _publish_mqtt_status(board_id: str, status: str, total_count: Optional[int] 
                 client.disconnect()
 
         except Exception as e:
-            logger.warning(f"MQTT publish error (attempt {attempt}/{retries}): {e}")
+            # Log full stack trace so that with --verbose you can see exactly why publish failed
+            logger.warning(
+                f"MQTT publish error (attempt {attempt}/{retries}): {e}",
+                exc_info=True,
+            )
             if client:
                 try:
                     client.loop_stop()
