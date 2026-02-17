@@ -154,9 +154,9 @@ def setup_logging(
     # Clear existing handlers
     root_logger.handlers.clear()
     
-    # Console handler - only show errors (progress bars will show progress)
+    # Console handler - mirror main log level to stdout
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.ERROR)  # Only show errors on console
+    console_handler.setLevel(level)  # Show same level on console as in log files
     
     if json_logging:
         console_formatter = JSONFormatter()
