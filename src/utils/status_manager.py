@@ -4,7 +4,6 @@ Status file management for tracking processing state and MQTT publishing
 import os
 import json
 import time
-import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -173,24 +172,20 @@ def _publish_mqtt_status(board_id: str, status: str, total_count: Optional[int] 
                 client.disconnect()
 
         except Exception as e:
-            # Log full stack trace so that with --verbose you can see exactly why publish failed
+            # Log full stack trace so that with --verbose you can see exactly why publish failed,
+            # then re-raise so the caller can see the real exception instead of only a warning.
             logger.warning(
                 f"MQTT publish error (attempt {attempt}/{retries}): {e}",
                 exc_info=True,
             )
-            # Also print traceback directly to stdout so it is visible even if logs go to a file
-            try:
-                print(f"MQTT publish error (attempt {attempt}/{retries}): {e}")
-                traceback.print_exc()
-            except Exception:
-                # Never let debug printing break the main flow
-                pass
             if client:
                 try:
                     client.loop_stop()
                     client.disconnect()
                 except Exception:
                     pass
+            # Do not swallow the exception – propagate it so the caller sees the real cause.
+            raise
 
         if attempt < retries:
             time.sleep(2)
@@ -224,24 +219,18 @@ def write_status_file(status, total_count=None, processed_count=None, board_id: 
         logger.error(f"Failed to write status file: {e}", exc_info=True)
     
     # Publish to MQTT
-    try:
-        if board_id is None:
-            # Try to get board_id from device_utils
-            try:
-                from src.utils.device_utils import get_device_id
-                board_id = get_device_id()
-            except Exception as e:
-                logger.debug(f"Could not get device ID for MQTT: {e}")
-                return  # Skip MQTT if we can't get board_id
-        
-        _publish_mqtt_status(board_id, status, total_count, processed_count)
-    except Exception as e:
-        logger.warning(f"Failed to publish MQTT status: {e}", exc_info=True)
-        # Also print traceback to stdout to make debugging easier on constrained devices
+    if board_id is None:
+        # Try to get board_id from device_utils
         try:
-            print(f"Failed to publish MQTT status: {e}")
-            traceback.print_exc()
-        except Exception:
-            pass
-        # Don't fail the whole operation if MQTT fails
+            from src.utils.device_utils import get_device_id
+            board_id = get_device_id()
+        except Exception as e:
+            # In this very specific case we *have* to catch the error, because without a
+            # board_id we cannot even attempt MQTT. Log it at debug level and return.
+            logger.debug(f"Could not get device ID for MQTT: {e}", exc_info=True)
+            return  # Skip MQTT if we can't get board_id
+    
+    # Let any MQTT-related exceptions from _publish_mqtt_status propagate to the caller
+    # so they are visible in logs and not hidden behind generic warnings.
+    _publish_mqtt_status(board_id, status, total_count, processed_count)
 
