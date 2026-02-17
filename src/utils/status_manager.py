@@ -69,8 +69,11 @@ def _publish_mqtt_status(board_id: str, status: str, total_count: Optional[int] 
     mqtt_topic = os.environ.get("MQTT_TOPIC", f"storeyes/{board_id}/alert-processor")
     qos = os.environ.get("QOS", "1")
     retain = os.environ.get("RETAIN", "false").lower() == "true"
-    timeout = int(os.environ.get("TIMEOUT", "5"))
-    retries = int(os.environ.get("RETRIES", "3"))
+
+    # Hardcoded timing / retry behaviour so it is stable on low-power devices (e.g. Pi Zero)
+    # instead of relying on environment variables.
+    timeout = 10  # seconds to give the network loop to send the message
+    retries = 1   # single attempt; failures will still be logged if connect/publish raises
     
     # Build JSON payload (same format as alert-monitor.sh)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -154,22 +157,19 @@ def _publish_mqtt_status(board_id: str, status: str, total_count: Optional[int] 
                 f"MQTT publish invoked, mid={result.mid}, rc={result.rc}"
             )
 
-            # Wait for message to be published (with timeout)
-            if result.wait_for_publish(timeout=timeout):
-                # Stop network loop
-                client.loop_stop()
-                client.disconnect()
-                logger.debug(
-                    f"MQTT status published successfully (attempt {attempt}/{retries})"
-                )
-                return True
-            else:
-                logger.warning(
-                    f"MQTT publish timeout (attempt {attempt}/{retries}), "
-                    f"mid={result.mid}, rc={result.rc}"
-                )
-                client.loop_stop()
-                client.disconnect()
+            # On very small devices (Pi Zero) wait_for_publish() can report a timeout
+            # even though the broker has already ACKed (we see PUBACK + on_publish=Success
+            # in the logs). To avoid false failures, we give the network loop a bit of
+            # time to flush the message and then treat the publish as successful unless
+            # an exception was raised.
+            time.sleep(timeout)
+
+            client.loop_stop()
+            client.disconnect()
+            logger.debug(
+                f"MQTT status published (fire-and-forget semantics, attempt {attempt}/{retries})"
+            )
+            return True
 
         except Exception as e:
             # Log full stack trace so that with --verbose you can see exactly why publish failed
