@@ -71,6 +71,13 @@ def _publish_mqtt_status(board_id: str, status: str, total_count: Optional[int] 
     retain = os.environ.get("RETAIN", "false").lower() == "true"
     timeout = int(os.environ.get("TIMEOUT", "5"))
     retries = int(os.environ.get("RETRIES", "3"))
+
+    # Log MQTT configuration being used for publishing
+    logger.info(
+        f"MQTT publish config: host={mqtt_host}, port={mqtt_port}, "
+        f"user={mqtt_user}, topic={mqtt_topic}, qos={qos}, "
+        f"timeout={timeout}, retries={retries}"
+    )
     
     # Build JSON payload (same format as alert-monitor.sh)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
