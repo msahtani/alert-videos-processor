@@ -61,7 +61,12 @@ def parse_config(config: configparser.ConfigParser, api_client) -> Dict[str, Any
         # Clip Configuration
         parsed["before_minutes"] = int(config.get("CLIP", "BEFORE_MINUTES").strip())
         parsed["after_minutes"] = int(config.get("CLIP", "AFTER_MINUTES").strip())
-        parsed["output_dir"] = config.get("CLIP", "OUTPUT_DIR").strip()
+        output_dir = config.get("CLIP", "OUTPUT_DIR").strip()
+        if not output_dir:
+            raise ValueError("OUTPUT_DIR is empty in config.conf! Please set OUTPUT_DIR to a valid directory path")
+        parsed["output_dir"] = os.path.normpath(
+            os.path.expanduser(os.path.expandvars(output_dir))
+        )
         parsed["chunk_duration_seconds"] = int(config.get("CLIP", "CHUNK_DURATION_SECONDS", fallback="300").strip())
         chunk_filename_pattern = config.get("CLIP", "CHUNK_FILENAME_PATTERN", fallback=None)
         parsed["chunk_filename_pattern"] = chunk_filename_pattern.strip() if chunk_filename_pattern else None
@@ -72,7 +77,9 @@ def parse_config(config: configparser.ConfigParser, api_client) -> Dict[str, Any
         local_source_dir = local_source_dir.strip()
         if not local_source_dir:
             raise ValueError("LOCAL_SOURCE_DIR is empty in config.conf! Please set LOCAL_SOURCE_DIR to a valid directory path")
-        parsed["local_source_dir"] = os.path.expandvars(local_source_dir)
+        parsed["local_source_dir"] = os.path.normpath(
+            os.path.expanduser(os.path.expandvars(local_source_dir))
+        )
         
         # Processing Configuration
         parsed["max_retries"] = int(config.get("PROCESSING", "MAX_RETRIES", fallback="3").strip())

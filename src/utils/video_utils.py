@@ -15,6 +15,8 @@ def ensure_browser_playable_mp4(video_path: str, quiet: bool = False) -> None:
     Raises:
         Exception: If ffmpeg is not found or conversion fails
     """
+    # Resolve $HOME, %USERPROFILE%, ~, etc. (config may pass unexpanded paths)
+    video_path = os.path.normpath(os.path.expanduser(os.path.expandvars(video_path)))
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
     
@@ -41,6 +43,10 @@ def ensure_browser_playable_mp4(video_path: str, quiet: bool = False) -> None:
             "-movflags", "+faststart",
             temp_output,
         ]
+        # Limit threads on low-memory hosts (SIGKILL/OOM during libx264). Override with env, e.g. ALERT_VIDEOS_FFMPEG_THREADS=4
+        threads = os.environ.get("ALERT_VIDEOS_FFMPEG_THREADS", "").strip()
+        if threads.isdigit() and int(threads) > 0:
+            cmd[2:2] = ["-threads", threads]  # after ffmpeg -y
         
         if quiet:
             # Suppress ffmpeg output
