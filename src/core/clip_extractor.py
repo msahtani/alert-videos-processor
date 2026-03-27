@@ -7,6 +7,8 @@ import subprocess
 import os
 import logging
 import re
+import math
+import shutil
 from typing import Optional, List, Dict, Tuple
 from pathlib import Path
 from src.utils.video_utils import (
@@ -198,6 +200,31 @@ class ClipExtractor:
         )
         return max(0.0, min(total / 2.0, total - 0.05))
 
+    def _ffprobe_duration_seconds(self, video_path: str) -> Optional[float]:
+        """Actual container duration in seconds (may differ slightly from wall-clock segment sum)."""
+        if not shutil.which("ffprobe"):
+            return None
+        try:
+            r = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    video_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=45,
+                check=True,
+            )
+            d = float(r.stdout.strip())
+            if d > 0 and not math.isnan(d):
+                return d
+        except (subprocess.CalledProcessError, ValueError, subprocess.TimeoutExpired, OSError):
+            pass
+        return None
+
     def _generate_thumbnail(
         self,
         video_file: str,
@@ -218,21 +245,41 @@ class ClipExtractor:
         timestamp = alert_time.strftime('%Y%m%d_%H%M%S')
         thumbnail_file = os.path.join(self.output_dir, f"thumb_{timestamp}.jpg")
 
-        logging.info(f"Generating thumbnail at t={seek_seconds:.2f}s (alert time in clip)...")
+        seek = max(0.0, float(seek_seconds))
+        probed = self._ffprobe_duration_seconds(video_file)
+        if probed is not None:
+            # Avoid seeking past EOF (stream-copy concat length vs. clock can differ slightly)
+            seek = min(seek, max(0.0, probed - 0.1))
+        logging.info(
+            f"Generating thumbnail at t={seek:.2f}s in clip"
+            + (f" (probed duration {probed:.2f}s)" if probed is not None else "")
+        )
 
         try:
-            # -ss after -i decodes to the requested time (frame-accurate for the thumbnail)
-            ss = f"{max(0.0, seek_seconds):.3f}"
-            subprocess.run([
-                "ffmpeg", "-y",
-                *ffmpeg_global_thread_args(),
-                "-i", video_file,
-                "-ss", ss,
-                "-vframes", "1",
-                "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
-                "-q:v", "2",
-                thumbnail_file
-            ], check=True, capture_output=True, text=True, timeout=60)
+            # -ss BEFORE -i: input seek (keyframe-aligned, fast, avoids decoding the whole clip).
+            # -ss after -i was slow on long clips and often caused timeouts or bad frames on Pi / MP4.
+            ss = f"{seek:.3f}"
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    *ffmpeg_global_thread_args(),
+                    "-ss", ss,
+                    "-i", video_file,
+                    "-an",
+                    "-sn",
+                    "-map", "0:v:0",
+                    "-frames:v", "1",
+                    "-vf",
+                    "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+                    "-q:v", "2",
+                    thumbnail_file,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
             
             if os.path.exists(thumbnail_file) and os.path.getsize(thumbnail_file) > 0:
                 logging.info(f"Thumbnail generated: {thumbnail_file}")
